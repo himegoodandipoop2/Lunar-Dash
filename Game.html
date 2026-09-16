@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lunar Dash</title>
+    <link rel="icon" href="./Images/favicon.ico" type="image/x-icon">
+
+    <!-- || Link all the CSS files || -->
+    <link rel="stylesheet" href="MainMenu.css">
+    <link rel="stylesheet" href="Game.css">
+</head>
+<body>
+
+    <!-- Scrolling color + pattern background, sits behind everything -->
+    <div class="game-background"></div>
+
+    <!-- Main gameplay canvas: player + obstacles are drawn here -->
+    <canvas id="game-canvas"></canvas>
+
+    <!-- Basic HUD -->
+    <div id="hud">
+        <span id="level-name"></span>
+        <span id="percent-display">0%</span>
+    </div>
+
+    <!-- || Link all the JS files, in dependency order || -->
+    <script src="Data.js" defer></script>
+    <script src="Levels.js" defer></script>
+    <script src="IconHandler.js" defer></script>
+    <script src="PlayerController.js" defer></script>
+    <script src="MainHandler.js" defer></script>
+</body>
+</html>

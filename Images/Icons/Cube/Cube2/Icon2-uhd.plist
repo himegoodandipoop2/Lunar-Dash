@@ -1,0 +1,71 @@
+<?xml version="1.0"?>
+<plist version="1.0">
+    <dict>
+        <key>frames</key>
+        <dict>
+            <key>Icon109Remake_001.png</key>
+            <dict>
+                <key>spriteOffset</key>
+                <string>{0,0}</string>
+                <key>spriteSize</key>
+                <string>{121,120}</string>
+                <key>spriteSourceSize</key>
+                <string>{121,120}</string>
+                <key>textureRect</key>
+                <string>{{2,138},{121,120}}</string>
+                <key>textureRotated</key>
+                <false />
+            </dict>
+            <key>Icon109Remake_2_001.png</key>
+            <dict>
+                <key>spriteOffset</key>
+                <string>{0,-1}</string>
+                <key>spriteSize</key>
+                <string>{112,113}</string>
+                <key>spriteSourceSize</key>
+                <string>{121,120}</string>
+                <key>textureRect</key>
+                <string>{{127,138},{112,113}}</string>
+                <key>textureRotated</key>
+                <false />
+            </dict>
+            <key>Icon109Remake_extra_001.png</key>
+            <dict>
+                <key>spriteOffset</key>
+                <string>{0,0}</string>
+                <key>spriteSize</key>
+                <string>{110,111}</string>
+                <key>spriteSourceSize</key>
+                <string>{121,120}</string>
+                <key>textureRect</key>
+                <string>{{138,2},{110,111}}</string>
+                <key>textureRotated</key>
+                <false />
+            </dict>
+            <key>Icon109Remake_glow_001.png</key>
+            <dict>
+                <key>spriteOffset</key>
+                <string>{0,0}</string>
+                <key>spriteSize</key>
+                <string>{132,132}</string>
+                <key>spriteSourceSize</key>
+                <string>{135,133}</string>
+                <key>textureRect</key>
+                <string>{{2,2},{132,132}}</string>
+                <key>textureRotated</key>
+                <false />
+            </dict>
+        </dict>
+        <key>metadata</key>
+        <dict>
+            <key>format</key>
+            <integer>3</integer>
+            <key>realTextureFileName</key>
+            <string>icons/Icon109Remake-uhd.png</string>
+            <key>size</key>
+            <string>{250, 260}</string>
+            <key>textureFileName</key>
+            <string>icons/Icon109Remake-uhd.png</string>
+        </dict>
+    </dict>
+</plist>

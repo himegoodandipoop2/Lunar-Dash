@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lunar Dash</title>
+    <link rel="icon" href="./Images/favicon.ico" type="image/x-icon">
+
+    <!-- || Link all the CSS files || -->
+    <link rel="stylesheet" href="MainMenu.css">
+</head>
+<body>
+
+    <h1 class="title">Lunar Dash</h1>
+
+    <!-- Icon select preview: layered base/secondary/glow, recolored via CSS mask -->
+    <div id="icon-preview" class="icon-preview">
+        <div class="icon-layer icon-glow"></div>
+        <div class="icon-layer icon-secondary"></div>
+        <div class="icon-layer icon-base"></div>
+    </div>
+
+    <div id="icon-select-list" class="icon-select-list">
+        <!-- IconHandler.js populates this with selectable icon thumbnails -->
+    </div>
+
+    <!-- || Link all the JS files || -->
+    <script src="Data.js" defer></script>
+    <script src="IconHandler.js" defer></script>
+    <script src="PlayerController.js" defer></script>
+    <script src="MainHandler.js" defer></script>
+</body>
+</html>
