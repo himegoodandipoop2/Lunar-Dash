@@ -6,29 +6,21 @@
     <title>Lunar Dash</title>
     <link rel="icon" href="./Images/favicon.ico" type="image/x-icon">
 
-    <!-- || Link all the CSS files || -->
-    <link rel="stylesheet" href="MainMenu.css">
-    <link rel="stylesheet" href="Game.css">
+    <!--
+        Game.html used to be its own page. index.html now hosts the main menu,
+        level select, gameplay and pause menu in one place, so this file only
+        forwards old links (carrying any ?level= through) to the new home.
+    -->
+    <meta http-equiv="refresh" content="0; url=./index.html">
+    <script>
+        (function () {
+            var level = new URLSearchParams(window.location.search).get('level');
+            var target = './index.html' + (level ? '?level=' + encodeURIComponent(level) : '');
+            window.location.replace(target);
+        }());
+    </script>
 </head>
 <body>
-
-    <!-- Scrolling color + pattern background, sits behind everything -->
-    <div class="game-background"></div>
-
-    <!-- Main gameplay canvas: player + obstacles are drawn here -->
-    <canvas id="game-canvas"></canvas>
-
-    <!-- Basic HUD -->
-    <div id="hud">
-        <span id="level-name"></span>
-        <span id="percent-display">0%</span>
-    </div>
-
-    <!-- || Link all the JS files, in dependency order || -->
-    <script src="Data.js" defer></script>
-    <script src="Levels.js" defer></script>
-    <script src="IconHandler.js" defer></script>
-    <script src="PlayerController.js" defer></script>
-    <script src="MainHandler.js" defer></script>
+    <p>Lunar Dash has moved. <a href="./index.html">Continue to the game</a>.</p>
 </body>
 </html>

@@ -1,25 +1,18 @@
-html, body {
-    width: 100%;
-    height: 100%;
-    overflow: hidden;
+/* Game.css
+   Gameplay-specific page behaviour.
+
+   index.html is a single page that hosts the menu, level select, gameplay and
+   pause menu, so the canvas itself (#stage-canvas), the colour pickers and the
+   boot error banner are styled in MainMenu.css. This file only holds the extra
+   bits that matter while a level is actually running. */
+
+#stage-canvas {
+    /* Keep the browser's own long-press and tap-highlight out of a run */
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
 }
 
-#game-canvas {
-    display: block;
-    width: 100%;
-    height: 100%;
-}
-
-#hud {
-    position: fixed;
-    top: 12px;
-    left: 50%;
-    transform: translateX(-50%);
-    color: white;
-    font-size: 20px;
-    font-weight: bold;
-    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
-    display: flex;
-    gap: 16px;
-    z-index: 10;
+body {
+    /* Stop the page rubber-banding on mobile when you tap to jump */
+    overscroll-behavior: none;
 }

@@ -14,15 +14,16 @@
 
 // -------------------- Manifest --------------------
 // Just the available icon numbers per mode. Lowest number = starter icon.
+// Modes with no shipped art yet still list a number so the icons screen and
+// gameplay can show the vector fallback instead of hiding the mode.
 const iconManifest = {
   [EntityTypes.CUBE]:   [1,2],   // add 2, 3, etc. here as you make more
-  [EntityTypes.SHIP]:   [],
-  [EntityTypes.BALL]:   [],
-  [EntityTypes.UFO]:    [],
-  [EntityTypes.WAVE]:   [],
-  [EntityTypes.ROBOT]:  [],
-  [EntityTypes.SPIDER]: [],
-  [EntityTypes.SWING]:  [],
+  [EntityTypes.SHIP]:   [1],
+  [EntityTypes.BALL]:   [1],
+  [EntityTypes.UFO]:    [1],
+  [EntityTypes.WAVE]:   [1],
+  [EntityTypes.ROBOT]:  [1],
+  [EntityTypes.SPIDER]: [1],
 };
 
 function getAvailableIcons(mode) {
@@ -35,7 +36,9 @@ function getStarterIcon(mode) {
 }
 
 function getIconPaths(mode, number) {
-  const folder = mode; // matches EntityTypes values: 'Cube', 'Ship', etc.
+  // Layout on disk is Images/Icons/<Mode>/<Mode><number>/Icon<number>-uhd.<ext>
+  // e.g. Images/Icons/Cube/Cube1/Icon1-uhd.png — one folder per icon.
+  const folder = `${mode}/${mode}${number}`; // matches EntityTypes values: 'Cube/Cube1', etc.
   return {
     sheet: `Images/Icons/${folder}/Icon${number}-uhd.png`,
     plist: `Images/Icons/${folder}/Icon${number}-uhd.plist`,
@@ -43,43 +46,9 @@ function getIconPaths(mode, number) {
 }
 
 // -------------------- Plist parsing --------------------
-function parsePlist(xmlText) {
-  const xml = new DOMParser().parseFromString(xmlText, 'application/xml');
-  const rootDict = xml.querySelector('plist > dict');
-  return parseDict(rootDict);
-}
-
-function parseDict(dictEl) {
-  const result = {};
-  const children = Array.from(dictEl.children);
-  for (let i = 0; i < children.length; i += 2) {
-    const key = children[i].textContent;
-    result[key] = parseValue(children[i + 1]);
-  }
-  return result;
-}
-
-function parseValue(el) {
-  switch (el.tagName) {
-    case 'dict':    return parseDict(el);
-    case 'array':   return Array.from(el.children).map(parseValue);
-    case 'integer': return parseInt(el.textContent, 10);
-    case 'real':    return parseFloat(el.textContent);
-    case 'true':    return true;
-    case 'false':   return false;
-    default:        return el.textContent; // string
-  }
-}
-
-function parseRect(str) {
-  const nums = str.match(/-?\d+(\.\d+)?/g).map(Number);
-  return { x: nums[0], y: nums[1], w: nums[2], h: nums[3] };
-}
-
-function parsePoint(str) {
-  const nums = str.match(/-?\d+(\.\d+)?/g).map(Number);
-  return { x: nums[0], y: nums[1] };
-}
+// parsePlist / parseDict / parseValue / parseRect / parsePoint / loadImage all
+// live in SheetHandler.js, which is loaded before this file. They are shared
+// with the menu/UI atlas code so there is exactly one implementation.
 
 // -------------------- Frame categorization --------------------
 // Figures out which parsed frame is base/secondary/glow/extra by suffix,
@@ -102,52 +71,45 @@ function categorizeFrames(frames) {
   return result;
 }
 
-// -------------------- Sheet loading (cached) --------------------
-const sheetCache = new Map(); // key: plist path -> { image, layers }
-
+// -------------------- Sheet loading --------------------
+// Uses the shared atlas loader (which already caches by plist path) and
+// re-shapes its frames into the icon layer model this file renders from.
 async function loadSheet(sheetPath, plistPath) {
-  if (sheetCache.has(plistPath)) return sheetCache.get(plistPath);
+  const sheet = await getSheet(sheetPath, plistPath);
 
-  const [image, plistText] = await Promise.all([
-    loadImage(sheetPath),
-    fetch(plistPath).then((res) => res.text()),
-  ]);
-
-  const parsed = parsePlist(plistText);
   const frames = {};
-  for (const [name, data] of Object.entries(parsed.frames)) {
+  for (const [name, f] of Object.entries(sheet.frames)) {
     frames[name] = {
-      textureRect: parseRect(data.textureRect),
-      spriteOffset: parsePoint(data.spriteOffset),
-      spriteSize: parsePoint(data.spriteSize),
-      spriteSourceSize: parsePoint(data.spriteSourceSize),
+      textureRect: f.rect,
+      rotated: !!f.rotated,
+      spriteOffset: { x: f.offX, y: f.offY },
+      spriteSize: { x: f.sizeW, y: f.sizeH },
+      spriteSourceSize: { x: f.srcW, y: f.srcH },
     };
   }
 
-  const result = { image, layers: categorizeFrames(frames) };
-  sheetCache.set(plistPath, result);
-  return result;
-}
-
-function loadImage(src) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = reject;
-    img.src = src;
-  });
+  return { image: sheet.image, layers: categorizeFrames(frames) };
 }
 
 // -------------------- Rendering --------------------
 function extractLayer(sheetImage, frame, color, skipTint) {
-  const { textureRect: r, spriteSize: size } = frame;
+  const { textureRect: r, spriteSize: size, rotated } = frame;
 
   const layerCanvas = document.createElement('canvas');
   layerCanvas.width = size.x;
   layerCanvas.height = size.y;
   const ctx = layerCanvas.getContext('2d');
 
-  ctx.drawImage(sheetImage, r.x, r.y, r.w, r.h, 0, 0, size.x, size.y);
+  if (rotated) {
+    // Stored sideways (footprint h x w): un-rotate back to upright.
+    ctx.save();
+    ctx.translate(size.x / 2, size.y / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.drawImage(sheetImage, r.x, r.y, r.h, r.w, -size.y / 2, -size.x / 2, size.y, size.x);
+    ctx.restore();
+  } else {
+    ctx.drawImage(sheetImage, r.x, r.y, r.w, r.h, 0, 0, size.x, size.y);
+  }
 
   if (!skipTint) {
     ctx.globalCompositeOperation = 'source-in';
@@ -169,10 +131,23 @@ function drawLayer(destCtx, layerCanvas, frame, originW, originH) {
 
 async function renderIcon(canvas, mode, number, colors) {
   const { sheet, plist } = getIconPaths(mode, number);
-  const { image, layers } = await loadSheet(sheet, plist);
+  let image;
+  let layers;
+  try {
+    ({ image, layers } = await loadSheet(sheet, plist));
+  } catch (err) {
+    // A mode with no art yet (or a failed download) falls back to a simple
+    // vector cube so the player is never invisible.
+    drawFallbackIcon(canvas, mode, number, colors);
+    return;
+  }
   const { base, secondary, glow, extra } = layers;
 
   const candidates = [base, secondary, glow, extra].filter(Boolean);
+  if (candidates.length === 0) {
+    drawFallbackIcon(canvas, mode, number, colors);
+    return;
+  }
   const originW = Math.max(...candidates.map((f) => f.spriteSourceSize.x));
   const originH = Math.max(...candidates.map((f) => f.spriteSourceSize.y));
 
@@ -186,6 +161,85 @@ async function renderIcon(canvas, mode, number, colors) {
   if (secondary) drawLayer(ctx, extractLayer(image, secondary, colors.secondary), secondary, originW, originH);
   if (base) drawLayer(ctx, extractLayer(image, base, colors.primary), base, originW, originH);
   if (extra) drawLayer(ctx, extractLayer(image, extra, null, true), extra, originW, originH);
+}
+
+// -------------------- Fallback rendering --------------------
+// Modes with no sprite art yet get a simple vector icon in the player's
+// colours, so every mode is playable and visible even before its art lands.
+function drawFallbackIcon(canvas, mode, number, colors) {
+  const size = 120;
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const primary = (colors && colors.primary) || '#00ffcc';
+  const secondary = (colors && colors.secondary) || '#ff00aa';
+  const glow = (colors && colors.glow) || '#ffffff';
+
+  ctx.clearRect(0, 0, size, size);
+  ctx.save();
+  ctx.shadowColor = glow;
+  ctx.shadowBlur = 14;
+
+  if (mode === EntityTypes.SHIP) {
+    // Simple triangular ship hull with a cockpit dot.
+    ctx.fillStyle = primary;
+    ctx.beginPath();
+    ctx.moveTo(12, 84);
+    ctx.lineTo(66, 84);
+    ctx.lineTo(104, 60);
+    ctx.lineTo(66, 36);
+    ctx.lineTo(12, 36);
+    ctx.closePath();
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = secondary;
+    ctx.beginPath();
+    ctx.arc(56, 60, 12, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (mode === EntityTypes.BALL) {
+    ctx.fillStyle = primary;
+    ctx.beginPath();
+    ctx.arc(60, 60, 44, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = secondary;
+    ctx.lineWidth = 8;
+    ctx.beginPath();
+    ctx.arc(60, 60, 26, 0, Math.PI * 2);
+    ctx.stroke();
+  } else if (mode === EntityTypes.WAVE) {
+    ctx.strokeStyle = primary;
+    ctx.lineWidth = 14;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(14, 88);
+    ctx.lineTo(44, 88);
+    ctx.lineTo(60, 32);
+    ctx.lineTo(76, 88);
+    ctx.lineTo(106, 88);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = secondary;
+    ctx.beginPath();
+    ctx.arc(60 + ((number || 1) % 3) * 4, 60, 8, 0, Math.PI * 2);
+    ctx.fill();
+  } else {
+    // Default: rounded cube with a secondary inset, like the real GD icons.
+    ctx.fillStyle = primary;
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(14, 14, 92, 92, 18);
+    else ctx.rect(14, 14, 92, 92);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = secondary;
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(32, 32, 56, 56, 10);
+    else ctx.rect(32, 32, 56, 56);
+    ctx.fill();
+    ctx.fillStyle = glow;
+    ctx.fillRect(52, 40, 16, 16);
+  }
+  ctx.restore();
 }
 
 // -------------------- Public handler --------------------
