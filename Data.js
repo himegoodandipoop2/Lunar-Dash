@@ -220,6 +220,25 @@ const uiAssets = {
     close: 'GJ_closeBtn_001.png',
     practice: 'GJ_practiceBtn_001.png',  // pause menu practice button
     topBar: 'GJ_topBar_001.png',         // GD's top bar strip
+
+    // ---- Create (level editor) chrome — GD 2.1's own editor buttons --------
+    // All of these live in the main UI atlas (sheets.game). The Build / Delete /
+    // Edit tabs ship in two states, so the selected tab is GD's own art (`*On`)
+    // rather than a drawn highlight; Swipe only has one frame (see renderCreate).
+    editBuild: 'edit_buildBtn_001.png',     // bottom bar tab: build (palette)
+    editBuildOn: 'edit_buildSBtn_001.png',  // ...the same tab, selected
+    editDelete: 'edit_deleteBtn_001.png',   // bottom bar tab: delete parts
+    editDeleteOn: 'edit_deleteSBtn_001.png',
+    editEdit: 'edit_editBtn_001.png',       // bottom bar tab: part options (SIZE)
+    editEditOn: 'edit_editSBtn_001.png',
+    editSwipe: 'edit_swipeBtn_001.png',     // bottom bar tab: swipe (drag) on/off
+    editLeft: 'edit_leftBtn_001.png',       // palette page arrows
+    editRight: 'edit_rightBtn_001.png',
+    undo: 'GJ_undoBtn_001.png',             // top bar: undo
+    redo: 'GJ_redoBtn_001.png',             // top bar: redo
+    pauseEditor: 'GJ_pauseEditorBtn_001.png', // top bar: editor pause sheet
+    playEditor: 'GJ_playEditorBtn_001.png',   // bottom bar: playtest the grid
+    gear: 'GJ_optionsBtn_001.png',            // top bar: level settings
   },
 };
 

@@ -154,30 +154,6 @@ function textButton(id, label, cx, cy, w, h, action) {
   return rect;
 }
 
-/** Lays a row of text buttons out evenly, shrinking them to fit narrow windows. */
-function createToolbar(items, y, h) {
-  const left = 96;                 // clear of the back button
-  const right = app.viewWidth - 16;
-  const gap = 10;
-  const ideal = items.reduce((sum, it) => sum + (it.w || 96), 0) + (items.length - 1) * gap;
-  const k = Math.min(1, (right - left) / Math.max(1, ideal));
-
-  let x = left;
-  for (const item of items) {
-    const w = Math.max(44, Math.round((item.w || 96) * k));
-    const rect = textButton(item.id, item.label, x + w / 2, y + h / 2, w, h, item.action);
-    if (item.active) {
-      ctx.save();
-      roundRect(ctx, rect.x - 2, rect.y - 2, rect.w + 4, rect.h + 4, 16);
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = '#00ffcc';
-      ctx.stroke();
-      ctx.restore();
-    }
-    x += w + gap;
-  }
-}
-
 // -------------------- Resource loading --------------------
 async function loadResources() {
   const { fonts, sheets } = app.resources;
@@ -1345,8 +1321,8 @@ const createScreen = {
   tool: BlockType.BLOCK,
   kind: null,        // catalog kind (block texture / spike style / orb colour / portal mode)
   camX: 0,           // horizontal camera in tiles
-  rows: CREATE_ROWS, // grid height in tiles (y = 0 is the ground row)
-  cols: 32,          // visible grid width in tiles
+  rows: CREATE_ROWS, // grid height in tiles (y = 0 is the ground row); the
+                     // visible column count comes from createEditorLayout()
   cells: new Map(),  // "tx,ty" -> { t, kind?, mode?, flip? }
   dragging: false,
   eraseMode: false,
@@ -1358,6 +1334,11 @@ const createScreen = {
   sizeW: 1,          // footprint stamped on new blocks / spikes / platforms
   sizeH: 1,
   undo: [],          // snapshots of `cells`, newest last
+  redo: [],          // snapshots popped off `undo`, newest last
+  page: 0,           // palette page — the strip pages instead of clipping
+  swipe: true,       // swipe mode: one drag paints a whole stroke (the SWIPE tab)
+  panel: null,       // open popover: null | 'parts' (the SIZE tab)
+  overlay: null,     // open sheet: null | 'pause' | 'settings'
   saveTimer: null,   // debounce handle for the localStorage autosave
   restored: false,   // draft restored once per page load
 };
@@ -1480,15 +1461,21 @@ function createPreviewSprite(cell) {
   return sprite || null;
 }
 
-// -------------------- Create undo --------------------
+// -------------------- Create undo / redo --------------------
 // One snapshot per stroke (a press, or a whole drag while the button is held),
 // so a mis-drag is one undo instead of forty. Snapshots are shallow clones of
 // the cell objects — they're never mutated after being stored.
 const CREATE_UNDO_LIMIT = 48;
 
+function createSnapshot() {
+  return [...createScreen.cells].map(([key, cell]) => [key, { ...cell }]);
+}
+
 function createPushUndo() {
-  createScreen.undo.push([...createScreen.cells].map(([key, cell]) => [key, { ...cell }]));
+  createScreen.undo.push(createSnapshot());
   if (createScreen.undo.length > CREATE_UNDO_LIMIT) createScreen.undo.shift();
+  // A fresh edit invalidates the redo trail, exactly like a text editor.
+  createScreen.redo.length = 0;
 }
 
 function createUndo() {
@@ -1497,10 +1484,82 @@ function createUndo() {
     createStatus('Nothing to undo', 1.5);
     return;
   }
+  createScreen.redo.push(createSnapshot());
   createScreen.cells = new Map(snapshot);
   createScreen.lastKey = null;
   createSaveSoon();
   createStatus('Undo', 1.5);
+}
+
+function createRedo() {
+  const snapshot = createScreen.redo.pop();
+  if (!snapshot) {
+    createStatus('Nothing to redo', 1.5);
+    return;
+  }
+  createScreen.undo.push(createSnapshot());
+  createScreen.cells = new Map(snapshot);
+  createScreen.lastKey = null;
+  createSaveSoon();
+  createStatus('Redo', 1.5);
+}
+
+// -------------------- Create modes and sheets --------------------
+// The bottom bar's tabs. BUILD/DELETE mirror the old BUILD/ERASE toggle (the
+// cell state lives in `eraseMode`, so everything downstream still reads one
+// flag), SIZE opens the part popover and SWIPE turns drag-painting on or off.
+function createSetBuildTab() {
+  createScreen.eraseMode = false;
+  createScreen.panel = null;
+}
+
+function createSetDeleteTab() {
+  createScreen.eraseMode = true;
+  createScreen.panel = null;
+  createScreen.lastKey = null;
+  createStatus('Delete mode — drag over parts to remove them', 2);
+}
+
+function createTogglePartsPanel() {
+  createScreen.panel = createScreen.panel === 'parts' ? null : 'parts';
+  if (createScreen.panel) createScreen.eraseMode = false;
+}
+
+function createToggleSwipe() {
+  createScreen.swipe = !createScreen.swipe;
+  createStatus(createScreen.swipe
+    ? 'Swipe on — a drag paints a whole stroke'
+    : 'Swipe off — a tap places a single part', 2);
+}
+
+// The name / level-settings sheets, opened from the top bar. Pass null to close.
+function createSetOverlay(name) {
+  createScreen.overlay = createScreen.overlay === name ? null : name;
+  createScreen.dragging = false;   // a tap must never keep painting behind a sheet
+  createScreen.lastKey = null;
+}
+
+// Clears the grid. One snapshot, so a mis-tap on CLEAR is a single UNDO away.
+function createClearGrid() {
+  if (createScreen.cells.size === 0) { createStatus('Already empty', 1.5); return; }
+  let ok = true;
+  try { ok = window.confirm(`Clear all ${createScreen.cells.size} parts?`); } catch (err) { /* no dialogs */ }
+  if (!ok) return;
+  createPushUndo();
+  createScreen.cells.clear();
+  createScreen.lastKey = null;
+  createSaveSoon();
+  createStatus('Cleared — UNDO brings it back', 2.5);
+}
+
+// Leaving the editor always flushes the autosave first, so the draft on disk
+// matches the grid that was last on screen.
+function createSaveAndExit() {
+  createSaveDraft();
+  createScreen.overlay = null;
+  createScreen.panel = null;
+  createScreen.dragging = false;
+  setScreen('menu');
 }
 
 function createStatus(text, seconds = 2.5) {
@@ -1669,6 +1728,7 @@ function openCreateScreen() {
   setScreen('create');
   createScreen.dragging = false;
   createScreen.lastKey = null;
+  createScreen.overlay = null;   // a sheet is never left open behind the menu
   // Restore once per page load — coming back from a playtest must NOT wipe the
   // grid that's still sitting in memory.
   if (!createScreen.restored) {
@@ -1677,43 +1737,144 @@ function openCreateScreen() {
   }
 }
 
-// -------------------- Create grid geometry --------------------
-const CREATE_TOP = 170;             // title + toolbar + hint row above the grid
-const CREATE_CHIP_W = 66;           // palette chip size
-const CREATE_CHIP_H = 56;
-const CREATE_CHIP_GAP = 8;
-const CREATE_PALETTE_PAD = 12;
-const CREATE_PALETTE_GAP = 12;      // vertical gap between the grid and the palette
-const CREATE_MAX_CHIP_ROWS = 4;     // beyond this a window is simply too narrow
+// -------------------- Create layout (GD 2.1 editor chrome) --------------------
+// The screen is three stacked bands, the way Geometry Dash's own editor is:
+//
+//   top bar     pause / undo / redo on the left, level name centre, gear right
+//   grid        the level viewport — tap or drag to build
+//   bottom bar  build / delete / size / swipe tabs, the paged palette, playtest
+//
+// Every number below is derived from app.viewWidth/viewHeight, so the editor
+// fits any window without a palette chip or a bar ever being clipped.
+const CREATE_TOPBAR_H = 64;         // GD's editor top bar
+const CREATE_BOTTOM_RATIO = 0.30;   // 2.1's palette band is about a third of the screen
+const CREATE_BOTTOM_MIN = 150;
+const CREATE_BOTTOM_MAX = 212;
+const CREATE_CHIP_ROWS = 2;         // palette rows per page — 2.1 shows two
+const CREATE_TAB_ASPECT = 2.9;      // the shipped tab art (edit_buildBtn) is ~296x98
 
-// The palette grows with LEVEL_PARTS (every block texture, spike style, orb
-// colour, portal mode...), so its height is derived from how many rows the
-// current window needs — the grid then takes whatever is left over.
-function createPaletteLayout() {
-  const count = createPalette().length;
-  const perRow = Math.max(1, Math.floor(
-    (app.viewWidth - CREATE_PALETTE_PAD * 2) / (CREATE_CHIP_W + CREATE_CHIP_GAP)));
-  const needed = Math.ceil(count / perRow);
-  const rows = Math.min(CREATE_MAX_CHIP_ROWS, Math.max(1, needed));
+function createEditorLayout() {
+  const w = app.viewWidth;
+  const h = app.viewHeight;
+  const pad = 10;
+  const gap = 8;
+
+  const topH = CREATE_TOPBAR_H;
+  const bottomH = clamp(Math.round(h * CREATE_BOTTOM_RATIO), CREATE_BOTTOM_MIN, CREATE_BOTTOM_MAX);
+  const barY = h - bottomH;
+
+  // Bottom-left tab stack: Build / Delete / SIZE / Swipe, one above the other.
+  let tabH = clamp(Math.floor((bottomH - pad * 2 - gap * 3) / 4), 18, 40);
+  let tabW = Math.round(tabH * CREATE_TAB_ASPECT);
+  const tabMaxW = Math.round(w * 0.18);
+  if (tabW > tabMaxW) {                     // very wide art on a very narrow window
+    tabW = tabMaxW;
+    tabH = Math.max(14, Math.round(tabW / CREATE_TAB_ASPECT));
+  }
+  const tabsX = pad;
+  const tabsH = tabH * 4 + gap * 3;
+  const tabsY = barY + pad + Math.max(0, Math.round((bottomH - pad * 2 - tabsH) / 2));
+
+  // Bottom-right playtest button.
+  const playW = clamp(Math.round(tabH * 1.7), 42, 76);
+  const playX = w - pad - playW / 2;
+
+  // The palette takes everything between the tabs and the play button: two rows
+  // of chips with a page arrow at each end (2.1 pages rather than scrolls).
+  const arrowW = clamp(Math.round(tabH * 1.1), 18, 34);
+  const palLeft = tabsX + tabW + 16 + arrowW + 4;
+  const palRight = w - pad - playW - 16 - arrowW - 4;
+  const palW = Math.max(40, palRight - palLeft);
+  const labelH = 16;                        // the "PAGE 1/2" line under the chips
+  const chipH = clamp(Math.floor((bottomH - pad * 2 - gap - labelH) / CREATE_CHIP_ROWS), 20, 50);
+  const chipW = Math.round(chipH * 1.2);
+  const perRow = Math.max(1, Math.floor((palW + gap) / (chipW + gap)));
+  const rows = CREATE_CHIP_ROWS;
+  const rowsH = rows * chipH + (rows - 1) * gap;
+  const palY = barY + pad + Math.max(0, Math.round((bottomH - pad * 2 - labelH - rowsH) / 2));
+  // Grid viewport: what's left between the two bars, minus the one-line status
+  // strip that shows the camera range and the active mode. The side gutters hold
+  // the camera arrows, so no button ever covers a tile.
+  const statusH = 22;
+  const bandY = topH + statusH;
+  const bandH = Math.max(110, barY - bandY);
+  const gutter = Math.min(40, Math.round(w * 0.035));
+  const cell = clamp(Math.floor((bandH - 10) / (createScreen.rows + 1)), 12, 46);
+  const cols = clamp(Math.floor((w - gutter * 2 - 8) / cell), 8, 64);
+  const gridW = cols * cell;
+  const gridH = (createScreen.rows + 1) * cell;   // +1: the ground row under y = 0
+  const gridX = Math.round((w - gridW) / 2);
+  const gridY = bandY + Math.max(4, Math.round((bandH - gridH) / 2));
+
   return {
-    count, perRow, rows, needed,
-    chipW: CREATE_CHIP_W, chipH: CREATE_CHIP_H, gap: CREATE_CHIP_GAP,
-    capacity: rows * perRow,
-    height: rows * CREATE_CHIP_H + (rows - 1) * CREATE_CHIP_GAP + CREATE_PALETTE_PAD * 2,
+    w, h, pad, gap, topH, bottomH, barY,
+    tabsX, tabsY, tabW, tabH,
+    playX, playW,
+    palLeft, palRight, palW, palY, palH: rowsH, rowsH, labelH, arrowW,
+    perRow, rows, chipW, chipH,
+    capacity: perRow * rows,
+    bandY, bandH, statusH, gutter, cell, cols, gridX, gridY, gridW, gridH,
   };
 }
 
+// Palette geometry + paging in one place, so the chips, the page arrows and the
+// "PAGE 1/2" counter can never disagree about which page is showing. The page
+// is clamped here too, because an import can shrink the palette's page count.
+function createPaletteLayout() {
+  const layout = createEditorLayout();
+  const count = createPalette().length;
+  const pages = Math.max(1, Math.ceil(count / layout.capacity));
+  const page = clamp(Number(createScreen.page) || 0, 0, pages - 1);
+  createScreen.page = page;
+  return {
+    count, pages, page,
+    perRow: layout.perRow, rows: layout.rows, capacity: layout.capacity,
+    chipW: layout.chipW, chipH: layout.chipH, gap: layout.gap,
+    pageStart: page * layout.capacity,
+    pageEnd: Math.min(count, (page + 1) * layout.capacity),
+  };
+}
+
+function createPalettePage(delta) {
+  const palette = createPaletteLayout();
+  createScreen.page = clamp(palette.page + delta, 0, palette.pages - 1);
+  createStatus(`Palette page ${createScreen.page + 1}/${palette.pages}`, 1.2);
+}
+
+function createGoToPage(page) {
+  const palette = createPaletteLayout();
+  createScreen.page = clamp(page, 0, palette.pages - 1);
+}
+
+// Keeps the selected chip on screen when the selection moves by keyboard.
+function createShowPartPage(index) {
+  const palette = createPaletteLayout();
+  const capacity = Math.max(1, palette.capacity);
+  createScreen.page = clamp(Math.floor(Math.max(0, index) / capacity), 0, palette.pages - 1);
+}
+
+// Steps the active part through the catalog (arrow keys), so every part is
+// reachable without touching the strip.
+function createSelectPart(delta) {
+  const palette = createPalette();
+  if (palette.length === 0) return;
+  const current = palette.findIndex((entry) => createEntryId(entry) === createEntryId(createScreen));
+  const index = ((current < 0 ? 0 : current) + delta + palette.length) % palette.length;
+  const entry = palette[index];
+  createScreen.tool = entry.type;
+  createScreen.kind = entry.kind || null;
+  createScreen.eraseMode = false;
+  createShowPartPage(index);
+  createStatus(`Selected ${entry.label}`, 1.2);
+}
+
 function createGridOrigin() {
-  // Grid + gap + palette must sum to what's left of the view, so the bottom
-  // chip row is never clipped off-screen.
-  const paletteH = createPaletteLayout().height + CREATE_PALETTE_GAP;
-  const availH = app.viewHeight - CREATE_TOP - paletteH;
-  const cell = Math.max(14, Math.floor(availH / (createScreen.rows + 1))); // +1: ground row below y=0
-  const gridW = createScreen.cols * cell;
-  const gridH = (createScreen.rows + 1) * cell;
-  const gridX = Math.max(16, Math.floor((app.viewWidth - gridW) / 2));
-  const gridY = CREATE_TOP;
-  return { cell, gridX, gridY, gridW, gridH };
+  const layout = createEditorLayout();
+  return {
+    cell: layout.cell, cols: layout.cols,
+    gridX: layout.gridX, gridY: layout.gridY,
+    gridW: layout.gridW, gridH: layout.gridH,
+  };
 }
 
 // Screen px -> tile coords. ty = tiles ABOVE the ground row, matching JSON.
@@ -1759,10 +1920,12 @@ function createInBounds(tx, ty) {
 
 // Steps the SIZE control through the footprints the shipped levels use. The
 // state is remembered in the draft so the next placement keeps it.
-function createCycleSize() {
+function createCycleSize(delta = 1) {
   const current = CREATE_SIZES.findIndex(
     ([w, h]) => w === createScreen.sizeW && h === createScreen.sizeH);
-  const next = CREATE_SIZES[(current + 1) % CREATE_SIZES.length];
+  const step = delta < 0 ? -1 : 1;
+  const from = current < 0 ? -1 : current;
+  const next = CREATE_SIZES[(from + step + CREATE_SIZES.length) % CREATE_SIZES.length];
   createScreen.sizeW = next[0];
   createScreen.sizeH = next[1];
   createSaveSoon();
@@ -1976,224 +2139,519 @@ function createPlaytest() {
   beginGameplay(level);
 }
 
+// -------------------- Create rendering --------------------
+// Three bands, drawn over the level backdrop: the top bar, the grid viewport and
+// the bottom bar. Sheets that open (pause / level settings) are drawn last so
+// their buttons win the hit test, and the grid stops registering its per-tile
+// buttons while one is open.
 function renderCreate() {
+  const layout = createEditorLayout();
+
   drawMenuBackdrop();
+  renderCreateGrid(layout);
+  renderCreateTopBar(layout);
+  renderCreateBottomBar(layout);
+  renderCreateStatus(layout);
+  renderCreateSheets(layout);
+}
 
-  const big = app.resources.fonts.big;
-  const cx = app.viewWidth / 2;
-
-  big.draw(ctx, 'CREATE LEVEL', cx, 14, {
-    scale: big.scaleForCap(34), align: 'center', anchor: 'top',
-  });
-
-  // Toolbar: one evenly-spaced row that shrinks to fit narrow windows, so the
-  // editor stays usable at any aspect ratio.
-  const barY = 62;
-  const barH = 38;
-  const tools = [
-    { id: 'create-build', label: 'BUILD', active: !createScreen.eraseMode, action: () => {
-      createScreen.eraseMode = false;
-    } },
-    { id: 'create-erase', label: 'ERASE', active: createScreen.eraseMode, action: () => {
-      createScreen.eraseMode = true;
-    } },
-    { id: 'create-undo', label: 'UNDO', w: 84, action: createUndo },
-    { id: 'create-clear', label: 'CLEAR', w: 92, action: () => {
-      if (createScreen.cells.size === 0) { createStatus('Already empty', 1.5); return; }
-      let ok = true;
-      try { ok = window.confirm(`Clear all ${createScreen.cells.size} parts?`); } catch (err) { /* no dialogs */ }
-      if (!ok) return;
-      createPushUndo();
-      createScreen.cells.clear();
-      createScreen.lastKey = null;
-      createSaveSoon();
-      createStatus('Cleared — UNDO brings it back', 2.5);
-    } },
-    { id: 'create-name', label: 'NAME', w: 88, action: createAskForName },
-    { id: 'create-size', label: createSizeLabel(), w: 104, action: createCycleSize },
-    { id: 'create-import', label: 'IMPORT', w: 96, action: createImportFile },
-    { id: 'create-play', label: 'TEST', w: 88, action: createPlaytest },
-    { id: 'create-export', label: 'EXPORT', w: 104, action: createDownloadExport },
-  ];
-  createToolbar(tools, barY, barH);
-
-  spriteButton('create-back', uiAssets.frames.menu, 56, barY + barH / 2, 52, () => {
-    createSaveDraft();  // leaving the editor flushes the autosave immediately
-    setScreen('menu');
-  });
-
-  // Camera scroll + part counter, on the grid's own row.
-  const hintY = barY + barH + 10;
-  textButton('create-left', '<', app.viewWidth / 2 - 60, hintY + 14, 48, 30, () => {
-    createScreen.camX = Math.max(0, createScreen.camX - 4);
-  });
-  textButton('create-right', '>', app.viewWidth / 2 + 60, hintY + 14, 48, 30, () => {
-    createScreen.camX += 4;
-  });
-  big.draw(ctx, `${Math.floor(createScreen.camX)} – ${Math.floor(createScreen.camX) + createScreen.cols}`, cx, hintY + 14, {
-    scale: big.scaleForCap(15), align: 'center', anchor: 'center', alpha: 0.75,
-  });
-  big.draw(ctx, `"${createScreen.name}"  ${createScreen.cells.size} PARTS  ${createSizeLabel().slice(5)}`, 16, hintY + 14, {
-    scale: big.scaleForCap(15), anchor: 'center', alpha: 0.75,
-  });
-  big.draw(ctx, createScreen.eraseMode ? 'ERASE MODE' : 'Tap or drag the grid to place', app.viewWidth - 16, hintY + 14, {
-    scale: big.scaleForCap(15), align: 'right', anchor: 'center',
-    alpha: 0.75, color: createScreen.eraseMode ? '#ff8a8a' : '#ffffff',
-  });
-
-  if (createScreen.messageTimer > 0 && createScreen.message) {
-    big.draw(ctx, createScreen.message, cx, hintY + 34, {
-      scale: big.scaleForCap(16), align: 'center', anchor: 'top', alpha: 0.95,
-    });
-  }
-
-  // Grid: one button per visible cell, so hit-testing and drawing agree.
-  const { cell, gridX, gridY, gridW, gridH } = createGridOrigin();
+// The grid itself: a dimmed viewport with GD's faint tile grid, the ground line
+// at y = 0, the level's start marker, the placed parts, a ghost of what the next
+// tap would place, and the camera arrows in the side gutters.
+function renderCreateGrid(layout) {
+  const { cell, cols, gridX, gridY, gridW, gridH } = layout;
   const camTiles = Math.floor(createScreen.camX);
 
   ctx.save();
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.14)';
+  ctx.fillStyle = 'rgba(6, 8, 20, 0.42)';
+  ctx.fillRect(gridX - 3, gridY - 3, gridW + 6, gridH + 6);
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.22)';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(gridX - 3, gridY - 3, gridW + 6, gridH + 6);
+
+  // Tile grid: every fifth line is brighter, so tiles can be counted the way
+  // they can in GD's own editor.
   ctx.lineWidth = 1;
-  for (let c = 0; c <= createScreen.cols; c++) {
+  for (let c = 0; c <= cols; c++) {
     const x = gridX + c * cell;
+    ctx.strokeStyle = (camTiles + c) % 5 === 0 ? 'rgba(255, 255, 255, 0.20)' : 'rgba(255, 255, 255, 0.10)';
     ctx.beginPath(); ctx.moveTo(x, gridY); ctx.lineTo(x, gridY + gridH); ctx.stroke();
   }
-  for (let r = 0; r <= createScreen.rows; r++) {
+  for (let r = 0; r <= createScreen.rows + 1; r++) {
     const y = gridY + r * cell;
+    ctx.strokeStyle = (createScreen.rows + 1 - r) % 5 === 0 ? 'rgba(255, 255, 255, 0.20)' : 'rgba(255, 255, 255, 0.10)';
     ctx.beginPath(); ctx.moveTo(gridX, y); ctx.lineTo(gridX + gridW, y); ctx.stroke();
   }
-  // Ground line under the bottom row.
+
+  // Ground line under the bottom row, plus the START marker at x = 0.
   ctx.strokeStyle = playerData.colors.primary;
-  ctx.globalAlpha = 0.8;
+  ctx.globalAlpha = 0.85;
   ctx.lineWidth = 3;
   ctx.beginPath();
   ctx.moveTo(gridX, gridY + gridH - cell);
   ctx.lineTo(gridX + gridW, gridY + gridH - cell);
   ctx.stroke();
+
+  if (camTiles <= 0) {
+    const startX = gridX - camTiles * cell;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 5]);
+    ctx.beginPath();
+    ctx.moveTo(startX, gridY);
+    ctx.lineTo(startX, gridY + gridH - cell);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
   ctx.restore();
 
-  renderCreateParts(cell, gridX, gridY, gridW, gridH, camTiles);
-}
+  renderCreateParts(layout, camTiles);   // placed parts, in the real gameplay art
+  renderCreateGhost(layout);             // ghost of the next placement
+  renderCreateCameraArrows(layout);
 
-// Placed parts, the invisible tap layer, and the palette strip. Split out of
-// renderCreate purely to keep each function a size that reads in one screenful.
-function renderCreateParts(cell, gridX, gridY, gridW, gridH, camTiles) {
-  const big = app.resources.fonts.big;
-
-  // Placed parts (atlas sprite where resolved, coloured box otherwise).
-  for (const [key, placed] of createScreen.cells) {
-    const [tx, ty] = key.split(',').map(Number);
-    // Cull on the part's footprint, not just its origin tile, so a wide part
-    // stays visible while its left tile scrolls off.
-    if (tx + (Number(placed.w) || 1) <= camTiles) continue;
-    if (tx >= camTiles + createScreen.cols) continue;
-
-    // Portals key their art off `mode`, so the whole cell is passed through.
-    const sprite = createPreviewSprite(placed);
-    const sheet = sprite ? gameplaySheet(sprite.sheet) : null;
-    const rect = createPartRect(placed, tx, ty);
-
-    if (placed.t === 'finish') {
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
-      ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
-      ctx.fillStyle = '#111122';
-      ctx.fillRect(rect.x, rect.y + rect.h / 2, rect.w / 2, rect.h / 2);
-      ctx.fillRect(rect.x + rect.w / 2, rect.y, rect.w / 2, rect.h / 2);
-    } else if (sheet && sheet.has(sprite.frame)) {
-      const anchor = sprite.anchor || 'center';
-      const ay = String(anchor).startsWith('bottom') ? rect.y + rect.h : rect.y + rect.h / 2;
-      sheet.draw(ctx, sprite.frame, rect.x + rect.w / 2, ay,
-        { width: rect.w, height: rect.h, anchor });
-    } else {
-      ctx.fillStyle = placed.t === 'spike' ? '#ff5a5a'
-        : placed.t === 'orb' ? ((ORB_KINDS[placed.kind] || ORB_KINDS.yellow) || { color: '#ffe66d' }).color
-        : placed.t === 'pad' ? ((PAD_KINDS[placed.kind] || PAD_KINDS.yellow) || { color: '#ffe66d' }).color
-        : placed.t === 'portal' ? '#b388ff' : '#2b2b52';
-      ctx.fillRect(rect.x + 1, rect.y + 1, rect.w - 2, rect.h - 2);
-    }
-  }
-
-  // One invisible tap layer per cell — registered as buttons so taps always hit
-  // exactly where drawn, and held drags keep painting new tiles.
-  for (let c = 0; c < createScreen.cols; c++) {
+  // One invisible button per visible tile: taps land exactly where the tile is
+  // drawn, and a held drag keeps painting through onPointerMove (when SWIPE is
+  // on). A sheet in the way swallows the grid instead of building behind it.
+  if (createScreen.overlay) return;
+  for (let c = 0; c < cols; c++) {
     const tx = camTiles + c;
     for (let r = 0; r < createScreen.rows; r++) {
       const ty = createScreen.rows - 1 - r;
-      const sx = gridX + c * cell;
-      const sy = gridY + r * cell;
       const key = createCellKey(tx, ty);
-      addButton(`create-cell-${key}`, sx, sy, cell, cell, () => {
+      addButton(`create-cell-${key}`, gridX + c * cell, gridY + r * cell, cell, cell, () => {
         createScreen.lastKey = null;
         createPlaceAt(tx, ty);
         createScreen.dragging = true;
       });
     }
   }
+}
 
-  // Palette strip along the bottom: every part LEVEL_PARTS knows about, laid
-  // out in as many rows as the window needs. The chip for the active part is
-  // outlined in cyan, and the sprite preview is the real in-game frame.
-  const palette = createPalette();
-  const layout = createPaletteLayout();
-  const palY = gridY + gridH + CREATE_PALETTE_GAP;
+// The camera arrows live in the gutters either side of the grid, so they can
+// never cover a tile the way a floating button would.
+function renderCreateCameraArrows(layout) {
+  const { gridX, gridW, gridY, gridH, gutter } = layout;
+  const cy = gridY + gridH / 2;
+  const w = clamp(Math.round(gutter * 0.9), 20, 36);
+  spriteButton('create-left', uiAssets.frames.arrowPrev, Math.max(w / 2 + 2, gridX / 2), cy, w,
+    () => createScrollCamera(-4));
+  spriteButton('create-right', uiAssets.frames.arrowNext,
+    Math.min(app.viewWidth - w / 2 - 2, gridX + gridW + gridX / 2), cy, w,
+    () => createScrollCamera(4));
+}
 
-  palette.forEach((entry, i) => {
-    if (i >= layout.capacity) return; // window too narrow for every chip
-    const col = i % layout.perRow;
-    const row = Math.floor(i / layout.perRow);
-    const x = CREATE_PALETTE_PAD + col * (layout.chipW + layout.gap);
-    const y = palY + CREATE_PALETTE_PAD + row * (layout.chipH + layout.gap);
-    const active = createEntryId(entry) === createEntryId(createScreen);
-
-    const rect = addButton(`create-part-${createEntryId(entry)}`, x, y, layout.chipW, layout.chipH, () => {
-      createScreen.tool = entry.type;
-      createScreen.kind = entry.kind || null;
-      createScreen.eraseMode = false;
-    });
-
-    ctx.save();
-    roundRect(ctx, rect.x, rect.y, rect.w, rect.h, 8);
-    ctx.fillStyle = active ? 'rgba(0, 255, 204, 0.25)' : 'rgba(255, 255, 255, 0.07)';
-    ctx.fill();
-    ctx.lineWidth = active ? 3 : 1;
-    ctx.strokeStyle = active ? '#00ffcc' : 'rgba(255, 255, 255, 0.25)';
-    ctx.stroke();
-    ctx.restore();
-
-    const sprite = createPreviewSprite(entry);
-    const sheet = sprite ? gameplaySheet(sprite.sheet) : null;
-    if (entry.type === 'finish') {
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
-      ctx.fillRect(rect.x + 22, rect.y + 6, rect.w - 44, rect.h - 12);
-    } else if (sheet && sheet.has(sprite.frame)) {
-      // Anchored parts (spikes) sit on the chip's floor; the rest are centred.
-      const anchored = String(sprite.anchor || '').startsWith('bottom');
-      sheet.draw(ctx, sprite.frame, rect.x + rect.w / 2,
-        anchored ? rect.y + rect.h - 11 : rect.y + rect.h / 2,
-        { width: rect.w - 12, height: rect.h - 12, anchor: sprite.anchor });
-    } else {
-      ctx.fillStyle = entry.type === 'spike' ? '#ff5a5a'
-        : entry.type === 'orb' ? (ORB_KINDS[entry.kind] || ORB_KINDS.yellow).color
-        : entry.type === 'pad' ? (PAD_KINDS[entry.kind] || PAD_KINDS.yellow).color
-        : entry.type === 'portal' ? '#b388ff' : '#2b2b52';
-      ctx.fillRect(rect.x + 18, rect.y + 8, rect.w - 36, rect.h - 16);
-    }
-
-    const label = layout.chipW < 52 ? entry.label.slice(0, 8) : entry.label;
-    big.draw(ctx, label, rect.x + rect.w / 2, rect.y + rect.h - 3, {
-      scale: big.scaleForCap(9), align: 'center', anchor: 'bottom', alpha: 0.85,
-    });
-  });
-
-  if (layout.capacity < layout.count) {
-    big.draw(ctx, `Widen the window to reach ${layout.count - layout.capacity} more parts`,
-      app.viewWidth / 2, palY + layout.height - 2, {
-        scale: big.scaleForCap(12), align: 'center', anchor: 'bottom', alpha: 0.6,
-      });
+// Placed parts, drawn with the real gameplay art: the atlas frame the part
+// resolved, or a coloured box when it has no art (pads, finish).
+function renderCreateParts(layout, camTiles) {
+  for (const [key, placed] of createScreen.cells) {
+    const [tx, ty] = key.split(',').map(Number);
+    // Cull on the part's footprint, not just its origin tile, so a wide part
+    // stays visible while its left tile scrolls off.
+    if (tx + (Number(placed.w) || 1) <= camTiles) continue;
+    if (tx >= camTiles + layout.cols) continue;
+    drawCreatedPart(placed, createPartRect(placed, tx, ty));
   }
 }
 
+// One part at its real footprint. Shared by the grid, the ghost preview and the
+// palette-free fallbacks, so what you are about to place looks like what lands.
+function drawCreatedPart(placed, rect) {
+  const sprite = createPreviewSprite(placed);
+  const sheet = sprite ? gameplaySheet(sprite.sheet) : null;
 
+  if (placed.t === 'finish') {
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+    ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+    ctx.fillStyle = '#111122';
+    ctx.fillRect(rect.x, rect.y + rect.h / 2, rect.w / 2, rect.h / 2);
+    ctx.fillRect(rect.x + rect.w / 2, rect.y, rect.w / 2, rect.h / 2);
+    return;
+  }
+
+  if (sheet && sheet.has(sprite.frame)) {
+    // Anchored parts (spikes) stand on the tile's floor; the rest sit centred.
+    const anchor = sprite.anchor || 'center';
+    const ay = String(anchor).startsWith('bottom') ? rect.y + rect.h : rect.y + rect.h / 2;
+    sheet.draw(ctx, sprite.frame, rect.x + rect.w / 2, ay,
+      { width: rect.w, height: rect.h, anchor });
+    return;
+  }
+
+  ctx.fillStyle = createPartFallbackColor(placed);
+  ctx.fillRect(rect.x + 1, rect.y + 1, rect.w - 2, rect.h - 2);
+}
+
+// The colour a part falls back to when its atlas frame is missing.
+function createPartFallbackColor(part) {
+  const type = part.type || part.t;
+  if (type === 'spike') return '#ff5a5a';
+  if (type === 'orb') return (ORB_KINDS[part.kind] || ORB_KINDS.yellow || { color: '#ffe66d' }).color;
+  if (type === 'pad') return (PAD_KINDS[part.kind] || PAD_KINDS.yellow || { color: '#ffe66d' }).color;
+  if (type === 'portal') return '#b388ff';
+  return '#2b2b52';
+}
+
+// Where the next tap would land, drawn under the pointer — 2.1 shows the same
+// ghost, and it is the only way to see a multi-tile SIZE before committing.
+function renderCreateGhost(layout) {
+  if (createScreen.overlay || createScreen.dragging) return;
+
+  const p = app.pointer;
+  if (p.x < layout.gridX || p.x > layout.gridX + layout.gridW) return;
+  if (p.y < layout.gridY || p.y > layout.gridY + layout.gridH) return;
+
+  const { tx, ty } = createTileAt(p.x, p.y);
+  if (!createInBounds(tx, ty)) return;
+
+  const tile = createCellRect(tx, ty);
+  ctx.save();
+  ctx.setLineDash([4, 4]);
+  ctx.lineWidth = 2;
+
+  if (createScreen.eraseMode) {
+    ctx.fillStyle = 'rgba(255, 90, 90, 0.28)';
+    ctx.fillRect(tile.x, tile.y, tile.w, tile.h);
+    ctx.strokeStyle = '#ff8a8a';
+    ctx.strokeRect(tile.x + 1, tile.y + 1, tile.w - 2, tile.h - 2);
+  } else {
+    const entry = createActiveEntry() || { t: 'block' };
+    const ghost = createPartRect(entry, tx, ty);
+    ctx.globalAlpha = 0.45;
+    drawCreatedPart(entry, ghost);
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = '#00ffcc';
+    ctx.strokeRect(ghost.x + 1, ghost.y + 1, ghost.w - 2, ghost.h - 2);
+  }
+  ctx.restore();
+}
+
+// Camera scroll, in whole tiles, clamped at the level start like GD's editor.
+function createScrollCamera(step) {
+  createScreen.camX = Math.max(0, Math.floor(createScreen.camX) + step);
+  createScreen.lastKey = null;   // painting carries on in the new position
+}
+
+// -------------------- Create top bar --------------------
+// pause · undo · redo ———— "level name" · parts ———— gear
+function renderCreateTopBar(layout) {
+  const { w, topH, pad } = layout;
+  const cy = topH / 2;
+  const big = app.resources.fonts.big;
+
+  drawCreateBar(0, 0, w, topH);
+
+  const pause = spriteButton('create-pause', uiAssets.frames.pauseEditor, pad + 22, cy, 42,
+    () => createSetOverlay('pause'));
+  const undo = spriteButton('create-undo', uiAssets.frames.undo, pause.x + pause.w + 34, cy, 38, createUndo);
+  const redo = spriteButton('create-redo', uiAssets.frames.redo, undo.x + undo.w + 30, cy, 38, createRedo);
+  if (createScreen.undo.length === 0) dimCreateButton(undo);
+  if (createScreen.redo.length === 0) dimCreateButton(redo);
+
+  // The level name doubles as the rename button, like GD's own title field.
+  const nameW = clamp(Math.round(w * 0.26), 140, 300);
+  const name = textButton('create-name', createScreen.name, w / 2, cy, nameW,
+    Math.min(32, topH - 20), createAskForName);
+  big.draw(ctx, `${createScreen.cells.size} PARTS`, name.x + name.w + 12, cy, {
+    scale: big.scaleForCap(14), anchor: 'center', alpha: 0.7,
+  });
+
+  spriteButton('create-gear', uiAssets.frames.gear, w - pad - 22, cy, 40,
+    () => createSetOverlay('settings'));
+}
+
+// GD's own top-bar strip, stretched across the window — or a plain dark bar when
+// the atlas isn't loaded (a failed asset fetch, or the headless test harness).
+function drawCreateBar(x, y, w, h) {
+  const sheet = app.resources.sheets.game;
+  const frame = uiAssets.frames.topBar;
+  if (sheet && sheet.has(frame)) {
+    sheet.draw(ctx, frame, x + w / 2, y + h / 2, { width: w, height: h });
+    return;
+  }
+  ctx.save();
+  ctx.fillStyle = 'rgba(12, 14, 26, 0.92)';
+  ctx.fillRect(x, y, w, h);
+  ctx.restore();
+}
+
+// A control that can't do anything yet is veiled rather than hidden, so the bar
+// never re-flows under the pointer.
+function dimCreateButton(rect) {
+  ctx.save();
+  ctx.fillStyle = 'rgba(6, 8, 16, 0.55)';
+  roundRect(ctx, rect.x, rect.y, rect.w, rect.h, 8);
+  ctx.fill();
+  ctx.restore();
+}
+
+function outlineCreateButton(rect) {
+  ctx.save();
+  roundRect(ctx, rect.x - 2, rect.y - 2, rect.w + 4, rect.h + 4, 10);
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = '#00ffcc';
+  ctx.stroke();
+  ctx.restore();
+}
+
+// -------------------- Create bottom bar --------------------
+// The tab stack, the paged palette and the playtest button, on GD's palette band.
+function renderCreateBottomBar(layout) {
+  const { w, barY, bottomH } = layout;
+
+  ctx.save();
+  ctx.fillStyle = 'rgba(10, 12, 24, 0.88)';
+  ctx.fillRect(0, barY, w, bottomH);
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.18)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0, barY + 1);
+  ctx.lineTo(w, barY + 1);
+  ctx.stroke();
+  ctx.restore();
+
+  renderCreateTabs(layout);
+  renderCreatePalette(layout);
+  renderCreatePartsPanel(layout);
+
+  spriteButton('create-play', uiAssets.frames.playEditor, layout.playX, barY + bottomH / 2,
+    layout.playW, createPlaytest);
+}
+
+// The four tabs, stacked down the bottom-left corner. GD ships a highlighted
+// ("S") frame for build / delete / size, so the selected tab uses GD's own art;
+// swipe has only one frame and gets an outline instead when it is on.
+function renderCreateTabs(layout) {
+  const { tabsX, tabsY, tabW, tabH, gap } = layout;
+  const sheet = app.resources.sheets.game;
+  const big = app.resources.fonts.big;
+  const cx = tabsX + tabW / 2;
+
+  const tabs = [
+    { id: 'create-build', label: 'BUILD', off: uiAssets.frames.editBuild, on: uiAssets.frames.editBuildOn,
+      active: !createScreen.eraseMode, action: createSetBuildTab },
+    { id: 'create-erase', label: 'DELETE', off: uiAssets.frames.editDelete, on: uiAssets.frames.editDeleteOn,
+      active: createScreen.eraseMode, action: createSetDeleteTab },
+    { id: 'create-edit', label: 'SIZE', off: uiAssets.frames.editEdit, on: uiAssets.frames.editEditOn,
+      active: createScreen.panel === 'parts', action: createTogglePartsPanel },
+    { id: 'create-swipe', label: 'SWIPE', off: uiAssets.frames.editSwipe, on: null,
+      active: createScreen.swipe, action: createToggleSwipe },
+  ];
+
+  tabs.forEach((tab, i) => {
+    const cy = tabsY + i * (tabH + gap) + tabH / 2;
+    const highlighted = Boolean(tab.active && tab.on && sheet && sheet.has(tab.on));
+    const rect = spriteButton(tab.id, highlighted ? tab.on : tab.off, cx, cy, tabW, tab.action);
+    if (tab.active && !highlighted) outlineCreateButton(rect);
+
+    // The tab art is icon-only, so the label rides the button's right half.
+    big.draw(ctx, tab.label, rect.x + rect.w * 0.72, cy, {
+      scale: big.scaleForCap(Math.min(13, rect.h * 0.55)),
+      align: 'center', anchor: 'center', alpha: 0.9,
+    });
+  });
+}
+
+// The palette strip: one page of chips at a time, an arrow at either end and a
+// page counter underneath (2.1 pages through its catalog the same way). Paging
+// is why the strip can never overflow — a narrow window shows fewer chips per
+// page instead of hiding them.
+function renderCreatePalette(layout) {
+  const palette = createPalette();
+  const info = createPaletteLayout();
+  const big = app.resources.fonts.big;
+  const { palY, rowsH, palLeft, chipW, chipH, gap, perRow } = layout;
+  const top = palY;
+  const cy = palY + rowsH / 2;
+
+  const prev = spriteButton('create-page-prev', uiAssets.frames.editLeft,
+    palLeft - layout.arrowW / 2 - 4, cy, layout.arrowW, () => createPalettePage(-1));
+  const next = spriteButton('create-page-next', uiAssets.frames.editRight,
+    layout.palRight + layout.arrowW / 2 + 4, cy, layout.arrowW, () => createPalettePage(1));
+  if (info.pages <= 1) { dimCreateButton(prev); dimCreateButton(next); }
+
+  for (let i = info.pageStart; i < info.pageEnd; i++) {
+    const entry = palette[i];
+    const slot = i - info.pageStart;
+    const x = palLeft + (slot % perRow) * (chipW + gap);
+    const y = top + Math.floor(slot / perRow) * (chipH + gap);
+    const active = createEntryId(entry) === createEntryId(createScreen);
+
+    const rect = addButton(`create-part-${createEntryId(entry)}`, x, y, chipW, chipH, () => {
+      createScreen.tool = entry.type;
+      createScreen.kind = entry.kind || null;
+      createScreen.eraseMode = false;
+      createShowPartPage(i);
+    });
+    drawCreateChip(rect, entry, active);
+  }
+
+  if (info.pages > 1) {
+    big.draw(ctx, `PAGE ${info.page + 1}/${info.pages}`, layout.w / 2, layout.barY + layout.bottomH - 3, {
+      scale: big.scaleForCap(12), align: 'center', anchor: 'bottom', alpha: 0.7,
+    });
+  }
+}
+
+// One palette chip: the part's real sprite on a rounded tile, cyan when it is
+// the active part, with its short label along the bottom.
+function drawCreateChip(rect, entry, active) {
+  const big = app.resources.fonts.big;
+
+  ctx.save();
+  roundRect(ctx, rect.x, rect.y, rect.w, rect.h, 8);
+  ctx.fillStyle = active ? 'rgba(0, 255, 204, 0.25)' : 'rgba(255, 255, 255, 0.07)';
+  ctx.fill();
+  ctx.lineWidth = active ? 3 : 1;
+  ctx.strokeStyle = active ? '#00ffcc' : 'rgba(255, 255, 255, 0.25)';
+  ctx.stroke();
+  ctx.restore();
+
+  const sprite = createPreviewSprite(entry);
+  const sheet = sprite ? gameplaySheet(sprite.sheet) : null;
+  const pad = Math.max(4, Math.round(rect.w * 0.12));
+
+  if (entry.type === 'finish') {
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+    ctx.fillRect(rect.x + rect.w * 0.35, rect.y + 6, rect.w * 0.3, rect.h - 18);
+  } else if (sheet && sheet.has(sprite.frame)) {
+    const anchored = String(sprite.anchor || '').startsWith('bottom');
+    sheet.draw(ctx, sprite.frame, rect.x + rect.w / 2,
+      anchored ? rect.y + rect.h - 12 : rect.y + (rect.h - 12) / 2,
+      { width: rect.w - pad * 2, height: rect.h - 16, anchor: sprite.anchor });
+  } else {
+    ctx.fillStyle = createPartFallbackColor(entry);
+    ctx.fillRect(rect.x + rect.w * 0.25, rect.y + 6, rect.w * 0.5, rect.h - 20);
+  }
+
+  const label = rect.w < 52 ? entry.label.slice(0, 8) : entry.label;
+  big.draw(ctx, label, rect.x + rect.w / 2, rect.y + rect.h - 2, {
+    scale: big.scaleForCap(9), align: 'center', anchor: 'bottom', alpha: 0.85,
+  });
+}
+
+// The SIZE tab's popover: the footprint stamped on the next block / spike /
+// platform, cycled through the sizes the shipped levels actually use.
+function renderCreatePartsPanel(layout) {
+  if (createScreen.panel !== 'parts') return;
+
+  const big = app.resources.fonts.big;
+  const w = clamp(Math.round(layout.w * 0.24), 150, 250);
+  const h = 92;
+  const x = layout.tabsX + layout.tabW + 12;
+  const y = Math.max(layout.topH + 8, layout.barY - h - 10);
+  const bh = 36;
+  const by = y + h - bh - 10;
+
+  ctx.save();
+  roundRect(ctx, x, y, w, h, 12);
+  ctx.fillStyle = 'rgba(18, 20, 38, 0.96)';
+  ctx.fill();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
+  ctx.stroke();
+  ctx.restore();
+
+  big.draw(ctx, 'PART SIZE', x + w / 2, y + 8, {
+    scale: big.scaleForCap(13), align: 'center', anchor: 'top', alpha: 0.8,
+  });
+
+  textButton('create-size-prev', '<', x + 12 + 16, by + bh / 2, 32, bh, () => createCycleSize(-1));
+  textButton('create-size', createSizeLabel(), x + w / 2, by + bh / 2, w - 24 - 72, bh, () => createCycleSize(1));
+  textButton('create-size-next', '>', x + w - 12 - 16, by + bh / 2, 32, bh, () => createCycleSize(1));
+}
+
+// The status strip between the top bar and the grid: camera position, level
+// size, what a drag does, and (over the level) the latest action.
+function renderCreateStatus(layout) {
+  const big = app.resources.fonts.big;
+  const camTiles = Math.floor(createScreen.camX);
+  const y = layout.topH + layout.statusH / 2;
+
+  big.draw(ctx, `${camTiles} – ${camTiles + layout.cols}`, layout.gridX, y, {
+    scale: big.scaleForCap(12), anchor: 'center', alpha: 0.65,
+  });
+  big.draw(ctx, `${createScreen.cells.size} PARTS · ${createSizeLabel().slice(5)}`,
+    layout.gridX + layout.gridW, y, {
+      scale: big.scaleForCap(12), align: 'right', anchor: 'center', alpha: 0.65,
+    });
+
+  const hint = createScreen.eraseMode ? 'DELETE — DRAG OVER PARTS TO REMOVE THEM'
+    : createScreen.swipe ? 'DRAG TO BUILD' : 'TAP TO PLACE · SWIPE OFF';
+  big.draw(ctx, hint, layout.w / 2, y, {
+    scale: big.scaleForCap(12), align: 'center', anchor: 'center', alpha: 0.8,
+    color: createScreen.eraseMode ? '#ff8a8a' : '#ffffff',
+  });
+
+  // Notices float over the level, where 2.1 posts them, with a dark copy behind
+  // for contrast against whatever art happens to be underneath.
+  if (createScreen.messageTimer > 0 && createScreen.message) {
+    const my = layout.bandY + Math.min(64, layout.bandH * 0.18);
+    const opts = { scale: big.scaleForCap(18), align: 'center', anchor: 'center' };
+    big.draw(ctx, createScreen.message, layout.w / 2 + 2, my + 2, { ...opts, color: 'rgba(0, 0, 0, 0.8)' });
+    big.draw(ctx, createScreen.message, layout.w / 2, my, opts);
+  }
+}
+
+// -------------------- Create sheets --------------------
+// The pause sheet and the level settings, drawn last so nothing in the bars can
+// steal their taps. Everything that saves, imports or exports lives here, which
+// is what keeps the top bar down to the four controls 2.1 shows.
+function renderCreateSheets(layout) {
+  const overlay = createScreen.overlay;
+  if (!overlay) return;
+
+  ctx.save();
+  ctx.fillStyle = 'rgba(4, 5, 12, 0.72)';
+  ctx.fillRect(0, 0, layout.w, layout.h);
+  ctx.restore();
+
+  // The sheet swallows everything under it: one full-screen button keeps taps on
+  // the dim away from the bars and the grid, while the sheet's own buttons (drawn
+  // after this) stay live.
+  addButton('create-sheet-shield', 0, 0, layout.w, layout.h, () => {});
+
+  const big = app.resources.fonts.big;
+  const panelW = clamp(Math.round(layout.w * 0.40), 300, 520);
+  const panelH = overlay === 'pause' ? 190 : 286;
+  const px = Math.round((layout.w - panelW) / 2);
+  const py = Math.round((layout.h - panelH) / 2);
+
+  ctx.save();
+  roundRect(ctx, px, py, panelW, panelH, 16);
+  ctx.fillStyle = 'rgba(18, 20, 38, 0.98)';
+  ctx.fill();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.28)';
+  ctx.stroke();
+  ctx.restore();
+
+  big.draw(ctx, overlay === 'pause' ? 'PAUSED' : 'LEVEL SETTINGS', px + panelW / 2, py + 14, {
+    scale: big.scaleForCap(24), align: 'center', anchor: 'top',
+  });
+
+  if (overlay === 'pause') {
+    const bw = Math.min(220, panelW - 60);
+    textButton('create-resume', 'RESUME', px + panelW / 2, py + panelH - 92, bw, 44,
+      () => createSetOverlay(null));
+    textButton('create-exit', 'SAVE & EXIT', px + panelW / 2, py + panelH - 36, bw, 44,
+      createSaveAndExit);
+    return;
+  }
+
+  const bw = Math.min(210, (panelW - 76) / 2);
+  const bh = 42;
+  const cols = [px + panelW * 0.28, px + panelW * 0.72];
+  const rows = [
+    [{ id: 'create-set-name', label: 'NAME', action: createAskForName },
+      { id: 'create-set-size', label: createSizeLabel(), action: () => createCycleSize(1) }],
+    [{ id: 'create-import', label: 'IMPORT', action: createImportFile },
+      { id: 'create-export', label: 'EXPORT', action: createDownloadExport }],
+    [{ id: 'create-clear', label: 'CLEAR', action: createClearGrid },
+      { id: 'create-settings-close', label: 'CLOSE', action: () => createSetOverlay(null) }],
+  ];
+  rows.forEach((row, r) => row.forEach((item, c) => {
+    textButton(item.id, item.label, cols[c], py + 72 + r * (bh + 14), bw, bh, item.action);
+  }));
+}
 
 // -------------------- Gameplay rendering --------------------
 // Level art comes from Levels.js' LEVEL_PARTS catalog, resolved through
@@ -2716,7 +3174,10 @@ function onPointerMove(event) {
 
   // Held drags keep painting (or erasing) across the create grid — the cell
   // button only fires on the initial press, so painting continues from here.
-  if (app.screen === 'create' && createScreen.dragging) {
+  // SWIPE decides whether a drag paints a whole stroke or only a tap places a
+  // part, and an open sheet swallows the drag entirely.
+  if (app.screen === 'create' && createScreen.dragging &&
+      createScreen.swipe && !createScreen.overlay) {
     const { tx, ty } = createTileAt(p.x, p.y);
     createPlaceAt(tx, ty);
   }
@@ -2748,17 +3209,72 @@ function isActionKey(event) {
   return event.code === 'Space' || event.code === 'ArrowUp' || event.code === 'KeyW';
 }
 
+// -------------------- Create keybinds --------------------
+// The editor drives itself from the keyboard the way GD's own drives from the
+// palette: these are the shortcuts the README's editor section documents. A
+// handled key is consumed, so the shared shortcuts (Space, R, Esc…) can never
+// double-fire on this screen.
+function createShortcutAction(event) {
+  const code = event.code;
+  const step = event.shiftKey ? 1 : 4;   // Shift = nudge the camera by one tile
+
+  // Escape closes an open sheet first, so a stray press can't cost a draft.
+  if (code === 'Escape') {
+    if (createScreen.overlay) createSetOverlay(null);
+    else createSaveAndExit();
+    return true;
+  }
+
+  if (code === 'KeyY' || (code === 'KeyZ' && event.shiftKey)) { createRedo(); return true; }
+  if (code === 'KeyZ') { createUndo(); return true; }
+
+  if (code === 'KeyB') { createSetBuildTab(); return true; }
+  if (code === 'KeyD' || code === 'Delete' || code === 'Backspace') { createSetDeleteTab(); return true; }
+  if (code === 'KeyS') { createToggleSwipe(); return true; }
+  if (code === 'KeyE') { createTogglePartsPanel(); return true; }
+
+  if (code === 'ArrowLeft') { createScrollCamera(-step); return true; }
+  if (code === 'ArrowRight') { createScrollCamera(step); return true; }
+  if (code === 'ArrowUp') { createSelectPart(-1); return true; }
+  if (code === 'ArrowDown') { createSelectPart(1); return true; }
+
+  if (code === 'Comma' || code === 'PageUp') { createPalettePage(-1); return true; }
+  if (code === 'Period' || code === 'PageDown') { createPalettePage(1); return true; }
+
+  if (code === 'Equal' || code === 'NumpadAdd') { createCycleSize(1); return true; }
+  if (code === 'Minus' || code === 'NumpadSubtract') { createCycleSize(-1); return true; }
+
+  // 1-9 jump straight to a palette page.
+  if (/^Digit[1-9]$/.test(code)) { createGoToPage(Number(code.slice(5)) - 1); return true; }
+
+  // Space / Enter / T play the grid — the editor's one "obvious action".
+  if (code === 'Space' || code === 'Enter' || code === 'KeyT') { createPlaytest(); return true; }
+
+  if (code === 'KeyN') { createAskForName(); return true; }
+  if (code === 'KeyG') { createSetOverlay('settings'); return true; }
+
+  return false;
+}
+
+function handleCreateKeyDown(event) {
+  if (app.screen !== 'create') return false;
+  const handled = createShortcutAction(event);
+  // Arrow keys and Space would otherwise scroll the page behind the canvas.
+  if (handled && typeof event.preventDefault === 'function') event.preventDefault();
+  return handled;
+}
+
 function onKeyDown(event) {
+  // The editor owns its own shortcut set, and it runs before the repeat guard
+  // because holding an arrow key to pan the camera is expected behaviour.
+  if (handleCreateKeyDown(event)) return;
+
   if (event.repeat) return;
 
   if (event.code === 'Escape') {
     if (app.screen === 'playing') enterPause();
     else if (app.screen === 'paused') quitToMenu(); // Esc in pause = leave to home
-    else if (app.screen === 'create') {
-      createSaveDraft();               // Esc flushes the autosave, same as BACK
-      setScreen('menu');
-    }
-    return;
+    return;                                         // Esc in the editor is handled above
   }
 
   // R restarts the run, from gameplay or from the pause menu

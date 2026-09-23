@@ -47,25 +47,72 @@ back to the seeded procedural builder, so nothing hard-crashes.
 
 ## Create — the level editor
 
-The home menu's **CREATE** button opens a tile-grid editor. It is driven by the same
-`LEVEL_PARTS` catalog the gameplay renderer blits, so the palette can never offer a
-part the game is unable to draw.
+The home menu's **CREATE** button opens a tile-grid editor laid out like Geometry
+Dash 2.1's own editor: a top bar, the level grid, and a palette band along the
+bottom. It is driven by the same `LEVEL_PARTS` catalog the gameplay renderer
+blits, so the palette can never offer a part the game is unable to draw.
+
+```text
+┌ [pause] [undo] [redo] ──── "My Level" · 128 PARTS ──── [gear] ┐  top bar
+│                          the level grid                       │  tap or drag to build
+│  ◀                                                         ▶  │  camera scroll
+├───────────────────────────────────────────────────────────────┤
+│ [BUILD]   ◀   chip chip chip chip chip chip chip   ▶  1/2     │  paged palette
+│ [DELETE]      chip chip chip chip chip chip chip              │
+│ [SIZE]                                                [TEST]  │
+│ [SWIPE]                                                       │
+└───────────────────────────────────────────────────────────────┘
+```
 
 | Piece | What it does |
 | --- | --- |
-| Palette (bottom strip) | One chip per catalog part — every block/spike kind, the platform, each pad and orb colour, every portal (the two gravity portals included) and the finish line. Chips show the real atlas frame. |
-| Grid | Tap or drag to place the selected part, one tile at a time; wide/tall parts draw at their real footprint. `<` / `>` scroll the camera along the level. |
-| BUILD / ERASE | `ERASE` deletes a tile as you drag over it. |
-| UNDO | One step per stroke — a whole drag counts as one. |
-| CLEAR | Empties the grid (and is undoable). |
-| SIZE | Cycles the footprint stamped on new blocks, spikes and platforms through the sizes the shipped levels use: `1x1`, `2x1`, `2x2`, `2x3`, `2x4`, `3x1`, `3x2` and `3x3`. |
-| NAME | Renames the level — the name also becomes the export's filename. |
-| IMPORT | Loads a `MainLevelSetup/*.json` file back onto the grid, header and all, so a shipped level can be opened, edited and exported again. |
+| Grid | Tap a tile to place the selected part, one tile at a time; wide/tall parts draw at their real footprint. A ghost under the pointer previews the size about to be stamped. `x = 0` is the level's start line, marked on the grid. |
+| BUILD | The default tab: taps and drags place the selected part. |
+| DELETE | Deletes parts under the tap, or under a drag. |
+| SIZE | Opens the part popover: cycles the footprint stamped on new blocks, spikes and platforms through the sizes the shipped levels use — `1x1`, `2x1`, `2x2`, `2x3`, `2x4`, `3x1`, `3x2` and `3x3`. |
+| SWIPE | Turns drag-painting on or off. With swipe off, a tap still places a single part — that is how you build precisely without a mouse. |
+| Palette | One chip per catalog part — every block/spike kind, the platform, each pad and orb colour, every portal (the two gravity portals included) and the finish line. Two rows per page with `◀` / `▶` paging, so a narrow window shows fewer chips per page instead of hiding them. Chips show the real atlas frame. |
+| pause | Opens the editor sheet: **RESUME**, or **SAVE & EXIT** back to the home menu. |
+| UNDO / REDO | One step per stroke — a whole drag counts as one. A new edit clears the redo trail. |
+| gear | Level settings: **NAME**, **SIZE**, **IMPORT**, **EXPORT**, **CLEAR** (undoable) and **CLOSE**. |
 | TEST | Plays the grid through the real gameplay pipeline (`convertJsonObject` → parts → sprites). Finishing or quitting returns to the editor with the grid intact. |
 | EXPORT | Downloads the grid as `MainLevelSetup`-shaped JSON. |
+| IMPORT | Loads a `MainLevelSetup/*.json` file back onto the grid, header and all, so a shipped level can be opened, edited and exported again. |
+
+### Editor keybinds
+
+| Key | Action |
+| --- | --- |
+| `Esc` | Close the open sheet — or, with none open, save the draft and return to the menu |
+| `Z` / `Ctrl+Z` | Undo |
+| `Y` / `Ctrl+Shift+Z` | Redo |
+| `B` | Build tab |
+| `D` / `Delete` / `Backspace` | Delete tab |
+| `E` | Open or close the part-size popover |
+| `S` | Toggle swipe (drag-painting) |
+| `←` / `→` | Scroll the camera 4 tiles (`Shift` = 1 tile) |
+| `↑` / `↓` | Previous / next part in the palette |
+| `,` `.` / `PageUp` `PageDown` | Previous / next palette page |
+| `1`–`9` | Jump to palette page N |
+| `+` / `-` | Next / previous part size |
+| `Space` / `Enter` / `T` | Playtest the grid |
+| `N` | Rename the level |
+| `G` | Open level settings |
 
 The draft autosaves to `localStorage` (`lunardash.create.draft.v1`) as you work, so a
-refresh never loses a level; `Escape` (or the back button) returns to the menu.
+refresh never loses a level; `Escape`, the pause sheet's **SAVE & EXIT**, or the
+**CLOSE** button on the settings sheet all leave the editor with the draft flushed.
+
+Every behaviour above is covered by `verify_create.js`, a headless harness that loads
+the real scripts in a Node `vm` with the DOM stubbed out and drives the buttons each
+frame registers (plus every keybind):
+
+```bash
+node verify_create.js
+```
+
+It prints the check count and exits non-zero on a regression. It also reads the shipped
+`.plist` atlases, so an editor sprite name that doesn't exist fails the run too.
 
 ### Getting an exported level into the game
 
@@ -135,6 +182,7 @@ There is no build step and no dependencies — everything is plain ES + `<script
 | `IconHandler.js` | Cocos2d-style sprite-sheet icon compositing (base / secondary / glow / extra) |
 | `PlayerController.js` | `Player` class + the `Physics` tuning constants |
 | `MainHandler.js` | Entry point. Screen machine + game loop for `index.html` |
+| `verify_create.js` | Headless harness for the level editor (`node verify_create.js`) |
 | `MainMenu.css`, `Game.css` | Styling |
 
 ### Load order matters
