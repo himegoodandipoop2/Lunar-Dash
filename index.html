@@ -2,32 +2,192 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0, user-scalable=no"
+    >
+
     <title>Lunar Dash</title>
+
     <link rel="icon" href="./Images/favicon.ico" type="image/x-icon">
 
-    <!-- || Link all the CSS files || -->
+    <!-- Main CSS -->
     <link rel="stylesheet" href="MainMenu.css">
+    <link rel="stylesheet" href="Game.css">
 </head>
+
 <body>
 
-    <h1 class="title">Lunar Dash</h1>
+    <!--
+        ============================================================
+        LUNAR DASH
+        ============================================================
+        The entire game is rendered onto this canvas.
 
-    <!-- Icon select preview: layered base/secondary/glow, recolored via CSS mask -->
-    <div id="icon-preview" class="icon-preview">
-        <div class="icon-layer icon-glow"></div>
-        <div class="icon-layer icon-secondary"></div>
-        <div class="icon-layer icon-base"></div>
+        MainHandler.js controls:
+        - Main menu
+        - Icon customization
+        - Level selection
+        - Gameplay
+        - Pause menu
+    -->
+    <canvas id="stage-canvas"></canvas>
+
+
+    <!--
+        ============================================================
+        COLOR CUSTOMIZATION PANEL
+        ============================================================
+        These are real HTML color inputs placed over the canvas.
+        MainHandler.js shows/hides this panel when needed.
+    -->
+    <div id="colour-panel" class="colour-panel" hidden>
+
+        <label>
+            Primary
+            <input
+                type="color"
+                id="color-primary"
+                value="#ffffff"
+            >
+        </label>
+
+        <label>
+            Secondary
+            <input
+                type="color"
+                id="color-secondary"
+                value="#ffffff"
+            >
+        </label>
+
+        <label>
+            Glow
+            <input
+                type="color"
+                id="color-glow"
+                value="#ffffff"
+            >
+        </label>
+
     </div>
 
-    <div id="icon-select-list" class="icon-select-list">
-        <!-- IconHandler.js populates this with selectable icon thumbnails -->
-    </div>
 
-    <!-- || Link all the JS files || -->
+    <!--
+        ============================================================
+        BOOT ERROR
+        ============================================================
+        MainHandler can display loading/resource errors here.
+    -->
+    <div id="boot-error" class="boot-error" hidden></div>
+
+
+    <!--
+        ============================================================
+        JAVASCRIPT LOAD ORDER
+        ============================================================
+
+        IMPORTANT:
+        Files are loaded in dependency order.
+
+        Data.js
+            ↓
+        SheetHandler.js
+            ↓
+        BlockDefinitions.js
+            ↓
+        Levels.js
+            ↓
+        IconHandler.js
+            ↓
+        PlayerController.js
+            ↓
+        MainHandler.js
+    -->
+
+
+    <!--
+        1. GLOBAL GAME DATA
+        Entity types, physics data, asset paths, level registry, etc.
+    -->
     <script src="Data.js" defer></script>
+
+
+    <!--
+        2. SPRITE / PLIST ATLAS HANDLER
+        Loads and parses:
+        - PNG sprite sheets
+        - .plist files
+        - BMFont files
+    -->
+    <script src="SheetHandler.js" defer></script>
+
+
+    <!--
+        3. BLOCK / OBJECT DEFINITIONS
+
+        Automatically reads every frame from:
+        - GJ_GameSheet-uhd.png/.plist
+        - GJ_GameSheet02-uhd.png/.plist
+
+        This must come AFTER SheetHandler.js.
+    -->
+    <script src="BlockDefinitions.js" defer></script>
+
+
+    <!--
+        4. LEVEL SYSTEM
+
+        Reads level JSON files and creates:
+        - Blocks
+        - Spikes
+        - Platforms
+        - Pads
+        - Orbs
+        - Portals
+        - Finish objects
+    -->
+    <script src="Levels.js" defer></script>
+
+
+    <!--
+        5. PLAYER ICON SYSTEM
+
+        Handles the player's:
+        - Cube
+        - Ship
+        - Ball
+        - UFO
+        - Wave
+        - Robot
+        - Spider
+    -->
     <script src="IconHandler.js" defer></script>
+
+
+    <!--
+        6. PLAYER PHYSICS
+
+        Handles:
+        - Movement
+        - Gravity
+        - Jumping
+        - Ship flight
+        - Ball gravity
+        - UFO jumps
+        - Wave movement
+        - Robot charging
+        - Spider teleporting
+    -->
     <script src="PlayerController.js" defer></script>
+
+
+    <!--
+        7. MAIN GAME CONTROLLER
+
+        This should be LAST because it depends on the systems above.
+    -->
     <script src="MainHandler.js" defer></script>
+
 </body>
 </html>
