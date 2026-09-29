@@ -607,6 +607,7 @@ function renderIcons() {
       setPlayerColors({ [iconScreen.colorTarget]: hex });
       syncColourInputs();
       if (iconScreen.mode) buildIconScreen(iconScreen.mode);
+      refreshGameIcon();
     });
     const isCurrent = playerData.colors[iconScreen.colorTarget].toLowerCase() === hex.toLowerCase();
     ctx.save();
@@ -660,6 +661,7 @@ function initColourPanel() {
     input.addEventListener('input', () => {
       setPlayerColors({ [key]: input.value });
       if (iconScreen.mode) buildIconScreen(iconScreen.mode);
+      refreshGameIcon();
     });
   }
 }
@@ -892,6 +894,15 @@ function resetLevel() {
 
   applyGameIcon(EntityTypes.CUBE);
   startLevelSong(game.level);
+}
+
+// The Icon Editor and the gameplay cube read the same playerData.colors, so a
+// colour change has to re-composite the icon already on screen — otherwise the
+// cube keeps the colours it was built with until the next level starts. No-op
+// when no level is running.
+function refreshGameIcon() {
+  if (!app.game) return;
+  applyGameIcon(EntityTypes.CUBE);
 }
 
 async function applyGameIcon(mode) {
@@ -2962,15 +2973,26 @@ function drawGameBackground(game) {
 
 function drawGamePlayer(game) {
   const player = game.player;
-  const size = player.width * AppConfig.iconScale;
   const hasArt = game.iconCanvas.width > 0 && game.iconCanvas.height > 0;
+  // The icon canvas is padded by `iconPad` so its soft glows have room to spill.
+  // Scale by the art size, not the padded canvas, so adding glow does not shrink
+  // the cube itself. `iconPad` is only set by the layered cube renderer, so the
+  // vector fallback and any other art are unaffected.
+  const pad = hasArt ? (game.iconCanvas.iconPad || 0) : 0;
+  const art = hasArt ? Math.max(1, game.iconCanvas.width - pad * 2) : 1;
+  const size = ((player.width * AppConfig.iconScale) / art) * game.iconCanvas.width;
 
   ctx.save();
   ctx.translate(player.x - game.cameraX, player.y);
   ctx.rotate(player.renderRotation);
 
   if (hasArt) {
+    // Nearest-neighbour keeps the cube crisp; only the glow layers were blurred
+    // when the icon was composited, so this never softens the artwork.
+    const prevSmoothing = ctx.imageSmoothingEnabled;
+    ctx.imageSmoothingEnabled = false;
     ctx.drawImage(game.iconCanvas, -size / 2, -size / 2, size, size);
+    ctx.imageSmoothingEnabled = prevSmoothing;
   } else {
     // Fallback square, so the player stays visible if icon art failed to load
     ctx.fillStyle = playerData.colors.primary;

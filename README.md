@@ -260,13 +260,13 @@ Images/Icons/<Mode>/<Mode><number>/Icon<number>-uhd.png
 Images/Icons/<Mode>/<Mode><number>/Icon<number>-uhd.plist
 ```
 
-For example `Images/Icons/Cube/Cube2/Icon2-uhd.png`.
+For example `Images/Icons/Cube/Cube1/Icon1-uhd.png`.
 
 Then register the number in the manifest at the top of `IconHandler.js`:
 
 ```js
 const iconManifest = {
-  [EntityTypes.CUBE]: [1, 2], // add 3, 4, ... as you add folders
+  [EntityTypes.CUBE]: [1], // add 2, 3, ... as you add folders
   [EntityTypes.SHIP]: [],
   // ...
 };
@@ -281,12 +281,172 @@ internal name prefix:
 | Suffix | Layer |
 | --- | --- |
 | `_2_###.png` | secondary shape (recoloured with `secondary`) |
-| `_glow_###.png` | glow outline (recoloured with `glow`) |
+| `_glow_###.png` | outer glow outline (recoloured with `glow`) |
+| `_innerGlow_###.png` | any further glow rings — a shape's inner glow, the ring round the secondary (recoloured with `glow`) |
 | `_extra_###.png` | detail layer (drawn last, **not** recoloured) |
 | anything else | base shape (recoloured with `primary`) |
 
+Glow rings belong in their **own** frame rather than baked into the base or
+secondary frame. A black pixel has zero luminance, so under a brightness-based tint
+it stays black no matter what colour the player picks — the glow picker would do
+nothing. Keeping the rings separate means they are white art, and white takes the
+glow colour like any other layer.
+
 The plist's `metadata.size` must match the real PNG dimensions, and every `textureRect`
 must sit inside the sheet — otherwise `drawImage` reads the wrong pixels.
+
+### Recolouring, and the middle square
+
+Layers are recoloured **by their own brightness**, not flattened to one fill. A flat
+`source-in` fill would erase everything inside a layer — the shipped Cube art puts
+the body *and* its outlines in the *same* frame, so flattening collapses it to
+"solid square + centre square" and the nested squares disappear. Scaling each layer's
+luminance by the player's colour keeps that structure: the artwork's brightest pixels
+land on exactly the chosen colour and its transparent areas stay transparent.
+
+Do not normalise the colour to a peak channel first. That looks correct for the
+default palette (every channel of `#00ffcc` reaches 255) but silently *lightens*
+any darker colour — `#22cc11` came out as `(42,255,21)` because the green channel
+was pushed past 255 and clamped. Scaling all three channels by one factor preserves
+the hue and needs no normalisation.
+
+The base is drawn **after** the secondary, so the base's hollow centre is what shows
+through around the middle square. The sheet's 44x44 secondary fills that hole exactly,
+which leaves no gap at all, so the shipped Cube 1 shrinks it via `iconDetailScale`
+(`IconHandler.js`):
+
+```js
+const iconDetailScale = {
+  'Cube/1': 0.68, // mode/number -> middle square drawn at 68% of its frame
+};
+```
+
+The base's hole is what you then see as the gap between the middle square and the outer
+one. `1` (the default) fills the hole exactly, which is right for art authored to fill it.
+
+The glow layer is wider than the base, and only its outer band overlaps the body, so the
+glow is thinned by shaving its **outer** edge — `iconGlowTrim` in the same file:
+
+```js
+const iconGlowTrim = {
+  'Cube/1': 4, // take 4px off the outside, leaving a 2px outline flush with the body
+};
+```
+
+Shave the inner edge instead and you get a transparent notch between the glow and the
+base, because everything inside that outer band is covered by the body anyway.
+
+### The shipped Cube 1 art
+
+`Images/Icons/Cube/Cube1` holds **`player_00-uhd.png` + `player_00-uhd.plist`** — the
+original Geometry Dash cube sheet, not an `Icon<number>-uhd.*` pair. It is registered
+by name in `iconFiles` at the top of `IconHandler.js`, so art can keep whatever file
+name it shipped with:
+
+```js
+const iconFiles = {
+  'Cube/1': {
+    sheet: 'Images/Icons/Cube/Cube1/player_00-uhd.png',
+    plist: 'Images/Icons/Cube/Cube1/player_00-uhd.plist',
+  },
+};
+```
+
+It is a **305x136 sheet with three frames**, composited onto a 133x132 canvas:
+
+| Frame | Size | Art | Used for |
+| --- | --- | --- | --- |
+| `player_00_glow_001.png` | 133x132 | white ring, rounded | the soft outer glow |
+| `player_00_001.png` | 121x120, **stored rotated 90°** | black outline, white body, black inner ring, hollow centre | outline + frame (`secondary`), body (`primary`) |
+| `player_00_2_001.png` | 44x44 | plain square | the eye (`primary`) |
+
+### How the GD cube is built
+
+`renderCubeIcon` (`IconHandler.js`) is used whenever a sheet supplies a base, a
+secondary *and* a glow frame. It layers, back to front:
+
+```
+OUTER CUBE GLOW -> OUTER CUBE -> INNER FRAME GLOW -> INNER FRAME
+                -> EYE GLOW -> EYE -> EYE OUTLINE
+```
+
+Everything is derived from the sheet, and no colour is hardcoded — the three
+colours all come from the `colors` argument, which is `playerData.colors`:
+
+- **Split, don't repaint.** The base frame is a ring whose body and outlines live in
+  the *same* image, so `splitByLuminance` separates it by brightness: light becomes
+  the Primary body, dark becomes the Secondary outline and inner frame. That keeps
+  the sheet's exact corner radii, band widths and antialiasing, and drops its white.
+- **Measure, don't type.** `measureBaseBands` reads dark/light/gap runs off the
+  middle scanline. Classifying by *opacity* alone does not work — the outline, body
+  and frame are all fully opaque, so they read as one run. Each band appears twice
+  (the cube is symmetric), and a dark run touching the gap is the inner frame; every
+  other dark run is the outer outline.
+- **Draw rings whole.** The body and outlines are rings, so their top and bottom
+  bands run across every column. Slicing by the middle scanline's columns drops
+  them, which is why the body is drawn as a full layer rather than as slices.
+- **Isolate the frame by radius, not columns.** The outline and the frame share
+  every column in the top and bottom bands, so a column mask drags the outline into
+  the frame's glow. `maskLayerByRadius` separates the concentric rings instead.
+- **Only the glows are blurred.** `CUBE_GLOW` holds the three radii/alphas; the
+  outer one is widest and faintest, the eye's tightest. The frame's glow is kept
+  *inside* the hole, hugging the frame's inner edge — a halo centred on the frame
+  spills over the ~20px body and swamps it.
+
+The eye is sized from the hole (`iconDetailScale`) and given its own outline whose
+thickness comes from the sheet's own inner-frame band.
+
+### Colours
+
+The Icon Editor writes to `playerData.colors` via `setPlayerColors`, and
+`renderIcon` reads the same object, so the editor preview and the gameplay cube
+cannot drift apart. `refreshGameIcon()` re-composites the in-game icon when a
+colour changes, so a live cube updates immediately instead of waiting for the next
+level. Nothing about colour selection is duplicated.
+
+### The padding
+
+`ICON_GLOW_PAD` (8px) is added to the icon canvas so the soft glows have room to
+spill; the art itself is drawn in its own coordinates and the pad recorded on
+`canvas.iconPad`, so `drawGamePlayer` can scale the blit to the *art* and the cube
+keeps its on-screen size. The vector fallback and any other art set no pad and are
+unaffected.
+
+**Smoothing.** Compositing uses the browser's default bilinear filtering, and the
+final in-game blit uses nearest-neighbour so the cube stays crisp — the glows were
+already blurred when the icon was composited, so this never softens the artwork.
+Never disable smoothing around scaled icon layers to "keep rings crisp": that
+switches to nearest-neighbour and makes the cube visibly blocky.
+
+**Mind the in-game downscale.** The cube hitbox is 30px and `AppConfig.iconScale` is
+1.15, so gameplay draws the 133px art at about 34.5px — a 3.9x reduction, where the 9px
+black bands land near 2px. The icons screen (148px preview, 64px thumbnails) is far
+more forgiving. If in-game detail reads as mush, raise `iconScale` rather than
+thinning the art.
+
+### A baked-in border becomes a second outline
+
+Some art draws its body *and* its outline in the same base frame. The glow layer
+already draws an outline, so that baked-in one shows up as a **second** outline.
+Absorb it by listing a border width in `iconBaseBorderFill` (`IconHandler.js`):
+
+```js
+const iconBaseBorderFill = {
+  'SomeMode/3': 11, // fold the base frame's outer 11px into the body colour
+};
+```
+
+The border is **filled with the body colour, not erased**. A rounded art's corners
+are *made of* that border, so deleting it would square the icon off; folding it into
+the body keeps the silhouette and loses the outline. The shipped Cube 1 art has no
+baked-in border, so the table is empty.
+
+### Highlights on a scaled layer
+
+Shrinking a layer with the browser's default bilinear smoothing turns its edge into
+a soft semi-transparent fringe, which reads as a highlight once it sits over the base
+layer's transparent hole. `drawLayer` turns `imageSmoothingEnabled` off for scaled
+blits, so these icons stay crisp — they are pixel art, and smoothing only ever hurt.
 
 ## Adding levels
 

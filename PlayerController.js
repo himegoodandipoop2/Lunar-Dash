@@ -1,91 +1,203 @@
 // PlayerController.js
-// Depends on EntityTypes and entityStore from Data.js — load Data.js first.
 //
-// Coordinate convention (matches Levels.js / MainHandler.js):
-//   x = world distance, grows to the right
-//   y = hitbox CENTER, grows DOWNWARD (canvas space)
-// So "up" is negative y. Levels author y as height-above-ground and flip it
-// when they hand the world bounds over, so nothing here needs to know that.
+// Geometry Dash 2.1-style player physics.
 //
-// Physics target:
-//   Geometry Dash 2.1 classic game modes.
-//   Cube / Ship / Ball / UFO / Wave / Robot / Spider.
+// Depends on:
+//   EntityTypes
+//   entityStore
+// from Data.js.
 //
-// The numerical values below are calibrated to this project's 30 px tile size.
-// The important goal is preserving the actual 2.1 movement relationships and
-// input behavior rather than copying internal GD engine units directly.
+// Coordinate convention:
+//   x = world distance, grows right
+//   y = hitbox CENTER, grows downward
+//
+// Physics is simulated at a fixed 240 Hz step.
+// Rendering can run at any frame rate.
+//
+// IMPORTANT:
+// This controller intentionally keeps the existing public API so it can
+// replace the old PlayerController without requiring MainHandler changes.
+//
+// Supported modes:
+//   Cube
+//   Ship
+//   Ball
+//   UFO
+//   Wave
+//   Robot
+//   Spider
+//
+// Supported mechanics:
+//   Normal / inverted gravity
+//   Mini mode
+//   Ground / ceiling bounds
+//   Solid surfaces
+//   Cube auto-jump
+//   Ship hold/release flight
+//   Ball gravity switching
+//   UFO airborne hops
+//   Wave 45-degree movement
+//   Robot variable jumps
+//   Spider surface teleport
+//   Gravity pads
+//
+// NOTE:
+// Geometry Dash's original engine uses internal units and implementation
+// details that are not completely documented publicly. These values are
+// calibrated around the project's 30 px tile size rather than pretending
+// that the game's internal units are literally pixels.
 
-// -------------------- Tunables --------------------
+
+// ============================================================
+// Physics constants
+// ============================================================
 
 const Physics = {
-  // Forward movement.
-  // This is equivalent to the default 1x gameplay speed for this project.
-  speed: 345,
 
-  // Classic gravity.
-  gravity: 2330,
+  // ----------------------------------------------------------
+  // Simulation
+  // ----------------------------------------------------------
 
-  // Prevent numerical explosions / tunneling.
-  terminalVelocity: 1400,
+  fixedStep: 1 / 240,
 
-  // Cube jump.
-  cubeJump: 600,
-
-  // UFO jump.
-  // UFO taps are independent mid-air hops.
-  ufoHop: 605,
-
-  // Ball gravity flip.
-  // The ball changes gravity instantly rather than performing a normal jump.
-  ballFlip: 620,
-
-  // Ship physics.
-  //
-  // Ship movement is acceleration based:
-  //   holding  -> accelerate against gravity
-  //   releasing -> gravity pulls the ship back
-  //
-  // These values are calibrated so the ship has the characteristic GD
-  // "floaty but responsive" control instead of behaving like a cube.
-  shipThrust: 2600,
-  shipGravity: 1800,
-  shipMaxVy: 550,
-
-  // Robot variable jump.
-  robotChargeRate: 1500,
-  robotMinJump: 520,
-  robotMaxJump: 1000,
-
-  // Transporter strengths used by MainHandler.
-  padBoost: 900,
-  orbBoost: 720,
-
-  // Physics is internally subdivided so gameplay is less dependent on the
-  // browser's rendering framerate.
-  maxStep: 1 / 240,
-
-  // Maximum simulation step from one render update.
   maxFrameTime: 0.1,
 
-  // Visual rotation smoothing.
-  rotationLerp: 18,
-  landSnapRate: 28,
+  maxSubSteps: 32,
 
-  // Spider horizontal search tolerance.
+
+  // ----------------------------------------------------------
+  // Horizontal speed
+  // ----------------------------------------------------------
+
+  // Normal 1x gameplay speed for this remake.
+  //
+  // MainHandler should change this when a speed portal is entered.
+  speed: 310,
+
+
+  // ----------------------------------------------------------
+  // General gravity
+  // ----------------------------------------------------------
+
+  gravity: 2330,
+
+  terminalVelocity: 1400,
+
+
+  // ----------------------------------------------------------
+  // Cube
+  // ----------------------------------------------------------
+
+  cubeJump: 525,
+
+
+  // ----------------------------------------------------------
+  // UFO
+  // ----------------------------------------------------------
+
+  // UFO performs a fixed hop on each tap.
+  ufoJump: 510,
+
+
+  // ----------------------------------------------------------
+  // Ball
+  // ----------------------------------------------------------
+
+  // Ball changes gravity rather than receiving a conventional
+  // jump impulse.
+  ballGravityMultiplier: 0.9582,
+
+
+  // ----------------------------------------------------------
+  // Ship
+  // ----------------------------------------------------------
+
+  shipGravityMultiplier: 0.9582,
+
+  shipThrust: 2450,
+
+  shipGravity: 1750,
+
+  shipMaxVelocity: 850,
+
+
+  // ----------------------------------------------------------
+  // Wave
+  // ----------------------------------------------------------
+
+  // Normal Wave = 45 degrees.
+  //
+  // Vertical speed therefore equals horizontal speed.
+  waveVerticalMultiplier: 1,
+
+
+  // Mini Wave is steeper.
+  //
+  // slope = 2
+  miniWaveVerticalMultiplier: 2,
+
+
+  // ----------------------------------------------------------
+  // Robot
+  // ----------------------------------------------------------
+
+  robotGravityMultiplier: 0.9,
+
+  robotMinJump: 300,
+
+  robotMaxJump: 920,
+
+  robotChargeRate: 1500,
+
+  robotMaxCharge: 0.42,
+
+
+  // ----------------------------------------------------------
+  // Spider
+  // ----------------------------------------------------------
+
   spiderHorizontalTolerance: 200,
 
-  // Small collision tolerance.
+
+  // ----------------------------------------------------------
+  // Collision
+  // ----------------------------------------------------------
+
   surfaceTolerance: 2,
+
+
+  // ----------------------------------------------------------
+  // Rotation
+  // ----------------------------------------------------------
+
+  rotationLerp: 18,
+
+  landSnapRate: 30,
+
+  shipRotationLerp: 12,
+
+
+  // ----------------------------------------------------------
+  // Gameplay
+  // ----------------------------------------------------------
+
+  // Small amount of input forgiveness.
+  inputBuffer: 0.035,
 };
 
-// A cube completes a half-turn over one complete jump arc.
-//
-// A full jump consists of:
-//   rise + fall
-//
-// The cube rotates 180 degrees across that arc.
-Physics.cubeSpinRate =
-  (Math.PI * Physics.gravity) / (2 * Physics.cubeJump);
+
+// ============================================================
+// Utility
+// ============================================================
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+
+function lerp(a, b, amount) {
+  return a + (b - a) * amount;
+}
 
 
 // ============================================================
@@ -93,18 +205,26 @@ Physics.cubeSpinRate =
 // ============================================================
 
 class Player {
+
   constructor(startType = EntityTypes.CUBE) {
+
     this.world = {
       groundY: 0,
-      ceilingY: 0,
+      ceilingY: -420,
     };
 
     this.reset(startType);
   }
 
+
+  // ==========================================================
+  // Entity configuration
+  // ==========================================================
+
   get config() {
     return entityStore[this.type];
   }
+
 
   get hitbox() {
     return this.config.hitbox;
@@ -112,14 +232,35 @@ class Player {
 
 
   // ==========================================================
+  // Size
+  // ==========================================================
+
+  get sizeMultiplier() {
+
+    return this.isMini ? 0.6 : 1;
+  }
+
+
+  get width() {
+
+    return this.hitbox.w * this.sizeMultiplier;
+  }
+
+
+  get height() {
+
+    return this.hitbox.h * this.sizeMultiplier;
+  }
+
+
+  // ==========================================================
   // Hitboxes
   // ==========================================================
 
-  // BLUE:
-  // Main solid collision box.
   get boxBlue() {
-    const w = this.hitbox.w;
-    const h = this.hitbox.h;
+
+    const w = this.width;
+    const h = this.height;
 
     return {
       left: this.x - w / 2,
@@ -129,51 +270,57 @@ class Player {
     };
   }
 
-  // RED:
-  // Hazard hitbox.
+
   get boxRed() {
-    const hb = this.config.hazardHitbox || this.hitbox;
+
+    const base =
+      this.config.hazardHitbox ||
+      this.hitbox;
+
+    const w = base.w * this.sizeMultiplier;
+    const h = base.h * this.sizeMultiplier;
 
     return {
-      left: this.x - hb.w / 2,
-      right: this.x + hb.w / 2,
-      top: this.y - hb.h / 2,
-      bottom: this.y + hb.h / 2,
+      left: this.x - w / 2,
+      right: this.x + w / 2,
+      top: this.y - h / 2,
+      bottom: this.y + h / 2,
     };
   }
 
-  // ROTATION:
-  // Used by MainHandler for landing / surface snapping.
+
   get boxRotation() {
-    const rb = this.config.rotationHitbox || this.hitbox;
+
+    const base =
+      this.config.rotationHitbox ||
+      this.hitbox;
+
+    const w = base.w * this.sizeMultiplier;
+    const h = base.h * this.sizeMultiplier;
 
     return {
-      left: this.x - rb.w / 2,
-      right: this.x + rb.w / 2,
-      top: this.y - rb.h / 2,
-      bottom: this.y + rb.h / 2,
+      left: this.x - w / 2,
+      right: this.x + w / 2,
+      top: this.y - h / 2,
+      bottom: this.y + h / 2,
     };
   }
 
-  get width() {
-    return this.hitbox.w;
-  }
-
-  get height() {
-    return this.hitbox.h;
-  }
 
   get left() {
     return this.x - this.width / 2;
   }
 
+
   get right() {
     return this.x + this.width / 2;
   }
 
+
   get top() {
     return this.y - this.height / 2;
   }
+
 
   get bottom() {
     return this.y + this.height / 2;
@@ -181,20 +328,29 @@ class Player {
 
 
   // ==========================================================
-  // Support state
+  // Support
   // ==========================================================
 
   get isSupported() {
-    const boundsSupport =
-      this.gravityDir === 1
-        ? this.onGround
-        : this.onCeiling;
 
-    return boundsSupport || this.onSolid;
+    return (
+      this.onGround ||
+      this.onCeiling ||
+      this.onSolid
+    );
   }
 
+
   setWorld(world) {
-    this.world = world;
+
+    if (!world) {
+      return;
+    }
+
+    this.world = {
+      ...this.world,
+      ...world,
+    };
   }
 
 
@@ -202,7 +358,8 @@ class Player {
   // Reset
   // ==========================================================
 
-  reset(startType = this.type) {
+  reset(startType = this.type || EntityTypes.CUBE) {
+
     this.type = startType;
 
     this.x = 0;
@@ -213,12 +370,15 @@ class Player {
     this.rotation = 0;
     this.renderRotation = 0;
 
-    // 1 = normal gravity, toward the ground.
-    // -1 = inverted gravity, toward the ceiling.
     this.gravityDir = 1;
 
+    this.isMini = false;
+
     this.isHolding = false;
+
     this.holdTime = 0;
+
+    this.inputBufferTime = 0;
 
     this.onGround = false;
     this.onCeiling = false;
@@ -228,39 +388,58 @@ class Player {
     this.finished = false;
 
     this.spinning = false;
-    this.spinStart = 0;
+
+    this.jumpQueued = false;
+
+    this.accumulator = 0;
   }
 
 
   // ==========================================================
-  // Game-mode changes
+  // Mode change
   // ==========================================================
 
   changeMode(newType) {
-    const oldGravity = this.gravityDir;
+
+    const oldGravity =
+      this.gravityDir;
 
     this.type = newType;
 
-    // Changing a game mode does NOT inherently change gravity.
-    //
-    // Gravity portals control gravity. Game-mode portals control the mode.
-    // This distinction matters for combinations such as:
-    //
-    //   upside-down ship
-    //   upside-down UFO
-    //   upside-down spider
-    //
+    // Mode portals do NOT change gravity.
     this.gravityDir = oldGravity;
 
-    this.spinning = false;
-    this.spinStart = 0;
-
-    this.rotation = 0;
-    this.renderRotation = 0;
-
     this.velocityY = 0;
+
     this.holdTime = 0;
 
+    this.inputBufferTime = 0;
+
+    this.jumpQueued = false;
+
+    this.rotation = 0;
+
+    this.renderRotation = 0;
+
+    this.spinning = false;
+
+    this.onGround = false;
+    this.onCeiling = false;
+    this.onSolid = false;
+  }
+
+
+  // ==========================================================
+  // Mini portal support
+  // ==========================================================
+
+  setMini(mini) {
+
+    this.isMini = !!mini;
+
+    // Changing size should not create a vertical impulse.
+    //
+    // Collision resolution will place the player correctly.
     this.onGround = false;
     this.onCeiling = false;
     this.onSolid = false;
@@ -272,358 +451,526 @@ class Player {
   // ==========================================================
 
   handleInputDown(solidObjects = null) {
-    const cfg = this.config;
 
     this.isHolding = true;
+
     this.holdTime = 0;
 
-    // Ball:
-    // click = reverse gravity.
-    if (cfg.flipGravityOnTap) {
-      this.flipGravity();
-      return;
-    }
+    this.inputBufferTime =
+      Physics.inputBuffer;
 
-    // Spider:
-    // click = instant teleport to the opposite surface.
-    if (cfg.teleportOnTap) {
-      this.teleportToNearestSurface(solidObjects);
-      return;
-    }
 
-    // Cube / UFO:
-    // click = jump.
-    if (cfg.input === 'jump' || cfg.input === 'tap') {
-      this.jump();
-      return;
-    }
+    switch (this.type) {
 
-    // Ship / Wave / Robot:
-    // handled during update().
+      case EntityTypes.CUBE:
+        this.tryCubeJump();
+        break;
+
+
+      case EntityTypes.UFO:
+        this.ufoJump();
+        break;
+
+
+      case EntityTypes.BALL:
+        this.tryBallFlip();
+        break;
+
+
+      case EntityTypes.SPIDER:
+        this.trySpiderTeleport(solidObjects);
+        break;
+
+
+      case EntityTypes.ROBOT:
+        // Robot stores the hold duration.
+        break;
+
+
+      case EntityTypes.SHIP:
+      case EntityTypes.WAVE:
+        // Continuous movement is handled in physicsStep().
+        break;
+    }
   }
+
 
   handleInputUp() {
-    const cfg = this.config;
-
-    // Robot:
-    // Jump strength is determined by how long the button was held.
-    if (cfg.chargeJump && this.isSupported) {
-      const power = Math.min(
-        Physics.robotMaxJump,
-        Physics.robotMinJump +
-          this.holdTime * Physics.robotChargeRate
-      );
-
-      this.velocityY = -power * this.gravityDir;
-    }
 
     this.isHolding = false;
+
+    // Robot jump is released at the current charge.
+    if (this.type === EntityTypes.ROBOT) {
+
+      if (this.isSupported) {
+
+        const charge =
+          clamp(
+            this.holdTime /
+              Physics.robotMaxCharge,
+            0,
+            1
+          );
+
+        const power =
+          lerp(
+            Physics.robotMinJump,
+            Physics.robotMaxJump,
+            charge
+          );
+
+        this.velocityY =
+          -power * this.gravityDir;
+
+        this.onGround = false;
+        this.onCeiling = false;
+        this.onSolid = false;
+      }
+
+      this.holdTime = 0;
+
+      return;
+    }
+
     this.holdTime = 0;
   }
 
 
   // ==========================================================
-  // Frame update
+  // Update
   // ==========================================================
 
-  update(deltaTime, world) {
+  update(deltaTime, world, solidObjects = null) {
+
     if (world) {
       this.world = world;
     }
 
-    // Clamp the incoming render delta.
-    let remaining = Math.min(
-      Math.max(0, deltaTime),
-      Physics.maxFrameTime
-    );
+    let frameTime =
+      clamp(
+        deltaTime,
+        0,
+        Physics.maxFrameTime
+      );
 
-    // Run multiple small physics steps.
-    //
-    // This makes the game-mode physics much more stable across monitors and
-    // browser frame rates.
-    while (remaining > 0) {
-      const dt = Math.min(remaining, Physics.maxStep);
+    this.accumulator += frameTime;
 
-      this.physicsStep(dt);
+    let steps = 0;
 
-      remaining -= dt;
+    while (
+      this.accumulator >= Physics.fixedStep &&
+      steps < Physics.maxSubSteps
+    ) {
+
+      this.physicsStep(
+        Physics.fixedStep,
+        solidObjects
+      );
+
+      this.accumulator -=
+        Physics.fixedStep;
+
+      steps++;
+    }
+
+    // Prevent a giant accumulated frame after a stall.
+    if (steps >= Physics.maxSubSteps) {
+      this.accumulator = 0;
     }
 
     this.updateVisualRotation(
-      Math.min(Math.max(0, deltaTime), Physics.maxFrameTime)
+      frameTime
     );
   }
 
 
   // ==========================================================
-  // Physics step
+  // Fixed physics step
   // ==========================================================
 
-  physicsStep(dt) {
-    const cfg = this.config;
+  physicsStep(dt, solidObjects = null) {
 
-    // GD gameplay continuously moves forward.
-    this.x += Physics.speed * dt;
+    if (!this.alive || this.finished) {
+      return;
+    }
 
-    this.applyVerticalPhysics(cfg, dt);
 
-    this.velocityY = clamp(
-      this.velocityY,
-      -Physics.terminalVelocity,
-      Physics.terminalVelocity
-    );
+    // --------------------------------------------------------
+    // Forward movement
+    // --------------------------------------------------------
 
-    this.y += this.velocityY * dt;
+    this.x +=
+      Physics.speed * dt;
 
-    this.applyWorldBounds();
 
-    // Cube:
-    //
-    // Holding the button can immediately trigger another jump after landing.
-    // This is the familiar GD "hold to auto-jump" behavior.
+    // --------------------------------------------------------
+    // Input buffer
+    // --------------------------------------------------------
+
+    if (this.inputBufferTime > 0) {
+
+      this.inputBufferTime =
+        Math.max(
+          0,
+          this.inputBufferTime - dt
+        );
+    }
+
+
+    // --------------------------------------------------------
+    // Mode physics
+    // --------------------------------------------------------
+
+    switch (this.type) {
+
+      case EntityTypes.CUBE:
+        this.updateCube(dt);
+        break;
+
+
+      case EntityTypes.SHIP:
+        this.updateShip(dt);
+        break;
+
+
+      case EntityTypes.BALL:
+        this.updateBall(dt);
+        break;
+
+
+      case EntityTypes.UFO:
+        this.updateUFO(dt);
+        break;
+
+
+      case EntityTypes.WAVE:
+        this.updateWave(dt);
+        break;
+
+
+      case EntityTypes.ROBOT:
+        this.updateRobot(dt);
+        break;
+
+
+      case EntityTypes.SPIDER:
+        this.updateSpider(dt);
+        break;
+
+
+      default:
+        this.updateGravityMode(dt);
+        break;
+    }
+
+
+    // --------------------------------------------------------
+    // Velocity clamp
+    // --------------------------------------------------------
+
+    this.velocityY =
+      clamp(
+        this.velocityY,
+        -Physics.terminalVelocity,
+        Physics.terminalVelocity
+      );
+
+
+    // --------------------------------------------------------
+    // Vertical movement
+    // --------------------------------------------------------
+
+    this.y +=
+      this.velocityY * dt;
+
+
+    // --------------------------------------------------------
+    // World collision
+    // --------------------------------------------------------
+
+    this.resolveWorldBounds();
+
+
+    // --------------------------------------------------------
+    // Solid collision
+    // --------------------------------------------------------
+
+    if (solidObjects) {
+
+      this.resolveSolidCollision(
+        solidObjects
+      );
+    }
+
+
+    // --------------------------------------------------------
+    // Cube hold-to-jump
+    // --------------------------------------------------------
+
     if (
       this.type === EntityTypes.CUBE &&
       this.isHolding &&
-      this.isSupported &&
-      this.velocityY >= 0
+      this.isSupported
     ) {
-      this.jump();
+
+      this.tryCubeJump();
     }
 
-    // Robot charging happens while supported.
+
+    // --------------------------------------------------------
+    // Robot charging
+    // --------------------------------------------------------
+
     if (
       this.type === EntityTypes.ROBOT &&
       this.isHolding &&
       this.isSupported
     ) {
-      this.holdTime += dt;
+
+      this.holdTime =
+        Math.min(
+          this.holdTime + dt,
+          Physics.robotMaxCharge
+        );
+
       this.velocityY = 0;
     }
   }
 
 
   // ==========================================================
-  // Vertical physics
+  // Cube
   // ==========================================================
 
-  applyVerticalPhysics(cfg, dt) {
+  updateCube(dt) {
 
-    // --------------------------------------------------------
-    // WAVE
-    // --------------------------------------------------------
-    //
-    // Wave has no gravity-based arc.
-    //
-    // Holding:
-    //     diagonal upward
-    //
-    // Releasing:
-    //     diagonal downward
-    //
-    // Both directions are straight lines.
-    if (this.type === EntityTypes.WAVE) {
-      const angle = this.isHolding
-        ? -cfg.diagonalAngle
-        : cfg.diagonalAngle;
+    this.velocityY +=
+      Physics.gravity *
+      this.gravityDir *
+      dt;
+  }
 
-      this.velocityY =
-        Math.sin(angle) * Physics.speed;
 
-      return;
+  tryCubeJump() {
+
+    if (!this.isSupported) {
+      return false;
     }
 
+    this.velocityY =
+      -Physics.cubeJump *
+      this.gravityDir;
 
-    // --------------------------------------------------------
-    // SHIP
-    // --------------------------------------------------------
-    //
-    // Holding accelerates the ship against gravity.
-    // Releasing allows gravity to pull it back.
-    //
-    // This is deliberately acceleration-based rather than a jump impulse.
-    if (this.type === EntityTypes.SHIP) {
-      const acceleration = this.isHolding
-        ? -Physics.shipThrust
-        : Physics.shipGravity;
+    this.onGround = false;
+    this.onCeiling = false;
+    this.onSolid = false;
 
-      this.velocityY +=
-        acceleration * this.gravityDir * dt;
+    this.spinning = true;
 
-      this.velocityY = clamp(
-        this.velocityY,
-        -Physics.shipMaxVy,
-        Physics.shipMaxVy
-      );
-
-      return;
-    }
-
-
-    // --------------------------------------------------------
-    // ROBOT
-    // --------------------------------------------------------
-    //
-    // Robot does not continuously accelerate while charging.
-    // It stores the hold duration and launches when released.
-    if (this.type === EntityTypes.ROBOT) {
-      if (this.isHolding && this.isSupported) {
-        this.velocityY = 0;
-      } else {
-        this.velocityY +=
-          Physics.gravity * this.gravityDir * dt;
-      }
-
-      return;
-    }
-
-
-    // --------------------------------------------------------
-    // CUBE / BALL / UFO / SPIDER
-    // --------------------------------------------------------
-    //
-    // These use standard gravity.
-    if (cfg.gravity) {
-      this.velocityY +=
-        Physics.gravity * this.gravityDir * dt;
-    }
+    return true;
   }
 
 
   // ==========================================================
-  // Visual rotation
+  // Ship
   // ==========================================================
 
-  updateVisualRotation(deltaTime) {
-    const dt = Math.min(
-      Math.max(0, deltaTime),
-      Physics.maxFrameTime
-    );
+  updateShip(dt) {
 
-    // --------------------------------------------------------
-    // CUBE
-    // --------------------------------------------------------
-    if (this.type === EntityTypes.CUBE) {
-      if (!this.isSupported) {
-        this.rotation +=
-          Physics.cubeSpinRate *
-          this.gravityDir *
-          dt;
+    const gravity =
+      Physics.shipGravity *
+      Physics.shipGravityMultiplier;
 
-        this.spinning = true;
+    if (this.isHolding) {
 
-        this.renderRotation +=
-          (this.rotation - this.renderRotation) *
-          Math.min(
-            1,
-            dt * Physics.rotationLerp
-          );
-      } else {
-        this.spinning = false;
+      this.velocityY -=
+        Physics.shipThrust *
+        this.gravityDir *
+        dt;
 
-        const step = Math.PI / 2;
+    } else {
 
-        const snapped =
-          Math.round(this.rotation / step) * step;
-
-        this.renderRotation +=
-          (snapped - this.renderRotation) *
-          Math.min(
-            1,
-            dt * Physics.landSnapRate
-          );
-
-        if (
-          Math.abs(
-            snapped - this.renderRotation
-          ) < 0.001
-        ) {
-          this.renderRotation = snapped;
-          this.rotation = snapped;
-        }
-      }
-
-      return;
+      this.velocityY +=
+        gravity *
+        this.gravityDir *
+        dt;
     }
 
 
-    // --------------------------------------------------------
-    // SHIP
-    // --------------------------------------------------------
-    if (this.type === EntityTypes.SHIP) {
-      const cfg = this.config;
+    const maxVelocity =
+      Physics.shipMaxVelocity *
+      (this.isMini ? 1.15 : 1);
 
-      const maxTilt =
-        cfg.maxTilt || 30;
 
-      const maxTiltRad =
-        maxTilt * Math.PI / 180;
-
-      const tilt =
-        (this.velocityY / Physics.shipMaxVy) *
-        maxTiltRad;
-
-      this.rotation = clamp(
-        tilt,
-        -maxTiltRad,
-        maxTiltRad
+    this.velocityY =
+      clamp(
+        this.velocityY,
+        -maxVelocity,
+        maxVelocity
       );
+  }
 
-      this.renderRotation +=
-        (this.rotation - this.renderRotation) *
-        Math.min(
-          1,
-          dt * Physics.rotationLerp
-        );
 
-      return;
+  // ==========================================================
+  // Ball
+  // ==========================================================
+
+  updateBall(dt) {
+
+    const gravity =
+      Physics.gravity *
+      Physics.ballGravityMultiplier;
+
+    this.velocityY +=
+      gravity *
+      this.gravityDir *
+      dt;
+  }
+
+
+  tryBallFlip() {
+
+    // Ball gravity switching is surface-based.
+    if (!this.isSupported) {
+      return false;
     }
 
+    this.gravityDir *= -1;
 
-    // --------------------------------------------------------
-    // BALL
-    // --------------------------------------------------------
+    // Do NOT give the ball an artificial jump impulse.
+    this.velocityY = 0;
+
+    this.onGround = false;
+    this.onCeiling = false;
+    this.onSolid = false;
+
+    return true;
+  }
+
+
+  // ==========================================================
+  // UFO
+  // ==========================================================
+
+  updateUFO(dt) {
+
+    const gravity =
+      Physics.gravity *
+      0.9582;
+
+    this.velocityY +=
+      gravity *
+      this.gravityDir *
+      dt;
+  }
+
+
+  ufoJump() {
+
+    this.velocityY =
+      -Physics.ufoJump *
+      this.gravityDir;
+
+    this.onGround = false;
+    this.onCeiling = false;
+    this.onSolid = false;
+  }
+
+
+  // ==========================================================
+  // Wave
+  // ==========================================================
+
+  updateWave() {
+
+    const mini =
+      this.isMini;
+
+    const verticalMultiplier =
+      mini
+        ? Physics.miniWaveVerticalMultiplier
+        : Physics.waveVerticalMultiplier;
+
+
+    // Wave movement is linear.
     //
-    // Ball rolls when moving between surfaces.
-    if (this.type === EntityTypes.BALL) {
-      if (!this.isSupported) {
-        const rollSpeed =
-          Math.abs(this.velocityY) /
-          Math.max(1, Physics.terminalVelocity);
+    // Horizontal speed = gameplay speed.
+    // Normal vertical speed = horizontal speed.
+    // Mini vertical speed = 2x horizontal speed.
 
-        this.rotation +=
-          (this.gravityDir > 0 ? 1 : -1) *
-          (2.5 + rollSpeed * 3) *
-          dt;
-      } else {
-        const step = Math.PI / 2;
+    this.velocityY =
+      (
+        this.isHolding
+          ? -1
+          : 1
+      ) *
+      Physics.speed *
+      verticalMultiplier;
+  }
 
-        const snapped =
-          Math.round(this.rotation / step) * step;
 
-        this.renderRotation +=
-          (snapped - this.renderRotation) *
-          Math.min(
-            1,
-            dt * Physics.landSnapRate
-          );
+  // ==========================================================
+  // Robot
+  // ==========================================================
 
-        this.rotation = this.renderRotation;
-      }
+  updateRobot(dt) {
+
+    if (
+      this.isHolding &&
+      this.isSupported
+    ) {
+
+      this.velocityY = 0;
 
       return;
     }
 
 
-    // --------------------------------------------------------
-    // Other modes
-    // --------------------------------------------------------
+    this.velocityY +=
+      Physics.gravity *
+      Physics.robotGravityMultiplier *
+      this.gravityDir *
+      dt;
+  }
 
-    this.renderRotation +=
-      (this.rotation - this.renderRotation) *
-      Math.min(
-        1,
-        dt * Physics.rotationLerp
-      );
+
+  // ==========================================================
+  // Spider
+  // ==========================================================
+
+  updateSpider(dt) {
+
+    // Spider uses normal gravity while travelling.
+    this.velocityY +=
+      Physics.gravity *
+      this.gravityDir *
+      dt;
+  }
+
+
+  trySpiderTeleport(solidObjects) {
+
+    // Spider needs surface contact.
+    if (!this.isSupported) {
+      return false;
+    }
+
+    return this.teleportToNearestSurface(
+      solidObjects
+    );
+  }
+
+
+  // ==========================================================
+  // Generic gravity
+  // ==========================================================
+
+  updateGravityMode(dt) {
+
+    this.velocityY +=
+      Physics.gravity *
+      this.gravityDir *
+      dt;
   }
 
 
@@ -631,21 +978,35 @@ class Player {
   // World bounds
   // ==========================================================
 
-  applyWorldBounds() {
-    const half =
-      (this.config.rotationHitbox || this.hitbox).h / 2;
+  resolveWorldBounds() {
+
+    const halfHeight =
+      this.height / 2;
+
 
     const groundLimit =
-      this.world.groundY - half;
+      this.world.groundY -
+      halfHeight;
+
 
     const ceilingLimit =
-      this.world.ceilingY + half;
+      this.world.ceilingY +
+      halfHeight;
+
 
     this.onGround = false;
     this.onCeiling = false;
 
-    // Normal gravity / ground.
-    if (this.y >= groundLimit) {
+
+    // --------------------------------------------------------
+    // Normal gravity
+    // --------------------------------------------------------
+
+    if (
+      this.gravityDir === 1 &&
+      this.y >= groundLimit
+    ) {
+
       this.y = groundLimit;
 
       if (this.velocityY > 0) {
@@ -655,8 +1016,16 @@ class Player {
       this.onGround = true;
     }
 
-    // Reverse gravity / ceiling.
-    if (this.y <= ceilingLimit) {
+
+    // --------------------------------------------------------
+    // Reverse gravity
+    // --------------------------------------------------------
+
+    if (
+      this.gravityDir === -1 &&
+      this.y <= ceilingLimit
+    ) {
+
       this.y = ceilingLimit;
 
       if (this.velocityY < 0) {
@@ -669,123 +1038,227 @@ class Player {
 
 
   // ==========================================================
-  // Mode abilities
+  // Solid collision
   // ==========================================================
 
-  jump() {
-    const cfg = this.config;
+  resolveSolidCollision(objects) {
 
-    // UFO is allowed to jump while airborne.
-    const canAirJump =
-      this.type === EntityTypes.UFO;
+    const player =
+      this.boxBlue;
 
-    // Cube / Robot require a surface.
-    if (!canAirJump && !this.isSupported) {
+    let bestSurface = null;
+
+
+    for (const obj of objects) {
+
+      if (
+        obj.type !== 'block' &&
+        obj.type !== 'platform'
+      ) {
+        continue;
+      }
+
+
+      const left =
+        obj.x;
+
+      const right =
+        obj.x +
+        obj.w;
+
+      const top =
+        obj.y -
+        obj.h;
+
+      const bottom =
+        obj.y;
+
+
+      // Horizontal overlap.
+      if (
+        player.right < left ||
+        player.left > right
+      ) {
+        continue;
+      }
+
+
+      // ------------------------------------------------------
+      // Normal gravity:
+      // land on the top of a block.
+      // ------------------------------------------------------
+
+      if (
+        this.gravityDir === 1 &&
+        this.velocityY >= 0
+      ) {
+
+        const targetY =
+          top -
+          this.height / 2;
+
+
+        const distance =
+          targetY -
+          this.y;
+
+
+        if (
+          distance >=
+            -Physics.surfaceTolerance &&
+          distance <=
+            Physics.surfaceTolerance +
+            Math.abs(this.velocityY) *
+              Physics.fixedStep
+        ) {
+
+          if (
+            !bestSurface ||
+            targetY < bestSurface.y
+          ) {
+
+            bestSurface = {
+              y: targetY,
+              type: 'ground',
+            };
+          }
+        }
+      }
+
+
+      // ------------------------------------------------------
+      // Reverse gravity:
+      // land on the bottom of a block.
+      // ------------------------------------------------------
+
+      if (
+        this.gravityDir === -1 &&
+        this.velocityY <= 0
+      ) {
+
+        const targetY =
+          bottom +
+          this.height / 2;
+
+
+        const distance =
+          targetY -
+          this.y;
+
+
+        if (
+          distance <=
+            Physics.surfaceTolerance &&
+          distance >=
+            -(
+              Physics.surfaceTolerance +
+              Math.abs(this.velocityY) *
+                Physics.fixedStep
+            )
+        ) {
+
+          if (
+            !bestSurface ||
+            targetY > bestSurface.y
+          ) {
+
+            bestSurface = {
+              y: targetY,
+              type: 'ceiling',
+            };
+          }
+        }
+      }
+    }
+
+
+    if (!bestSurface) {
       return;
     }
 
-    let power;
 
-    if (this.type === EntityTypes.UFO) {
-      power = Physics.ufoHop;
-    } else {
-      power = Physics.cubeJump;
-    }
+    this.y =
+      bestSurface.y;
 
-    this.velocityY =
-      -power * this.gravityDir;
+    this.velocityY = 0;
 
-    // Cube rotation begins when the jump begins.
-    if (this.type === EntityTypes.CUBE) {
-      this.spinning = true;
-      this.spinStart = this.rotation;
-    }
-  }
-
-
-  // ==========================================================
-  // Ball gravity
-  // ==========================================================
-
-  flipGravity() {
-    this.gravityDir *= -1;
-
-    // Ball switches direction immediately.
-    //
-    // Give it a small directional impulse so it leaves the old surface
-    // instead of spending a frame visually stuck to it.
-    this.velocityY =
-      Physics.ballFlip * this.gravityDir;
+    this.onSolid = true;
   }
 
 
   // ==========================================================
   // Spider teleport
   // ==========================================================
-  //
-  // Geometry Dash 2.1 Spider behavior:
-  //
-  // Normal gravity:
-  //     teleport to the nearest valid surface ABOVE
-  //     and switch gravity upward.
-  //
-  // Reverse gravity:
-  //     teleport to the nearest valid surface BELOW
-  //     and switch gravity downward.
-  //
-  // It is NOT simply "pick whichever surface is closest".
-  //
-  // Fingerdash describes the Spider as instantly teleporting to the nearest
-  // opposite solid surface and inverting gravity.
-  // ==========================================================
 
   teleportToNearestSurface(solidObjects = null) {
+
     const half =
-      (this.config.rotationHitbox || this.hitbox).h / 2;
+      this.height / 2;
 
-    const groundLimit =
-      this.world.groundY - half;
-
-    const ceilingLimit =
-      this.world.ceilingY + half;
 
     const goingUp =
       this.gravityDir === 1;
 
+
     let bestY = null;
-    let bestDistance = Infinity;
+
+    let bestDistance =
+      Infinity;
+
 
     // --------------------------------------------------------
-    // World boundary candidate
+    // World boundary
     // --------------------------------------------------------
+
+    const groundLimit =
+      this.world.groundY -
+      half;
+
+    const ceilingLimit =
+      this.world.ceilingY +
+      half;
+
 
     if (goingUp) {
-      // Normal gravity -> Spider goes upward.
+
       const distance =
-        Math.abs(this.y - ceilingLimit);
+        Math.abs(
+          this.y -
+          ceilingLimit
+        );
 
       if (distance < bestDistance) {
+
         bestDistance = distance;
+
         bestY = ceilingLimit;
       }
+
     } else {
-      // Reverse gravity -> Spider goes downward.
+
       const distance =
-        Math.abs(groundLimit - this.y);
+        Math.abs(
+          groundLimit -
+          this.y
+        );
 
       if (distance < bestDistance) {
+
         bestDistance = distance;
+
         bestY = groundLimit;
       }
     }
 
 
     // --------------------------------------------------------
-    // Block / platform candidates
+    // Blocks
     // --------------------------------------------------------
 
     if (solidObjects) {
+
       for (const obj of solidObjects) {
+
         if (
           obj.type !== 'block' &&
           obj.type !== 'platform'
@@ -793,67 +1266,104 @@ class Player {
           continue;
         }
 
-        const centerX =
-          obj.x + obj.w / 2;
 
-        const horizontalDistance =
-          Math.abs(this.x - centerX);
+        const left =
+          obj.x;
 
-        // Spider teleport stays roughly aligned with the player's
-        // horizontal position.
+        const right =
+          obj.x +
+          obj.w;
+
+
+        // Spider must be horizontally aligned
+        // with the destination surface.
+
         if (
-          horizontalDistance >
-          Physics.spiderHorizontalTolerance
+          this.x < left -
+            Physics.spiderHorizontalTolerance ||
+          this.x > right +
+            Physics.spiderHorizontalTolerance
         ) {
           continue;
         }
 
+
         const top =
-          obj.y - obj.h;
+          obj.y -
+          obj.h;
 
         const bottom =
           obj.y;
 
+
         if (goingUp) {
-          // We need a surface ABOVE the spider.
-          //
-          // The player's centre will sit half a hitbox below the
-          // block's top surface.
-          const targetY =
-            top - half;
 
-          if (targetY >= this.y) {
+          const targetY =
+            top -
+            half;
+
+
+          if (
+            targetY >= this.y
+          ) {
             continue;
           }
 
-          const distance =
-            this.y - targetY;
 
-          if (distance < bestDistance) {
-            bestDistance = distance;
-            bestY = targetY;
+          const distance =
+            this.y -
+            targetY;
+
+
+          if (
+            distance <
+            bestDistance
+          ) {
+
+            bestDistance =
+              distance;
+
+            bestY =
+              targetY;
           }
+
         } else {
-          // We need a surface BELOW the spider.
-          //
-          // The player's centre will sit half a hitbox above the
-          // block's bottom surface.
-          const targetY =
-            bottom + half;
 
-          if (targetY <= this.y) {
+          const targetY =
+            bottom +
+            half;
+
+
+          if (
+            targetY <= this.y
+          ) {
             continue;
           }
 
-          const distance =
-            targetY - this.y;
 
-          if (distance < bestDistance) {
-            bestDistance = distance;
-            bestY = targetY;
+          const distance =
+            targetY -
+            this.y;
+
+
+          if (
+            distance <
+            bestDistance
+          ) {
+
+            bestDistance =
+              distance;
+
+            bestY =
+              targetY;
           }
         }
       }
+    }
+
+
+    if (bestY === null) {
+      return false;
     }
 
 
@@ -861,23 +1371,23 @@ class Player {
     // Teleport
     // --------------------------------------------------------
 
-    if (bestY === null) {
-      return;
-    }
+    this.y =
+      bestY;
 
-    this.y = bestY;
 
-    // Spider switches gravity as part of the teleport.
     this.gravityDir *= -1;
 
     this.velocityY = 0;
 
     this.rotation = 0;
+
     this.renderRotation = 0;
 
     this.onGround = false;
     this.onCeiling = false;
     this.onSolid = false;
+
+    return true;
   }
 
 
@@ -886,21 +1396,263 @@ class Player {
   // ==========================================================
 
   applyGravityPad() {
+
     this.gravityDir *= -1;
 
-    this.velocityY =
-      Physics.ballFlip * this.gravityDir;
+    // Gravity pads/orbs change gravity.
+    // They do not use the Ball's artificial jump impulse.
+
+    this.velocityY = 0;
+
+    this.onGround = false;
+    this.onCeiling = false;
+    this.onSolid = false;
   }
-}
 
 
-// ============================================================
-// Utility
-// ============================================================
+  // ==========================================================
+  // Visual rotation
+  // ==========================================================
 
-function clamp(value, min, max) {
-  return Math.max(
-    min,
-    Math.min(max, value)
-  );
+  updateVisualRotation(deltaTime) {
+
+    const dt =
+      clamp(
+        deltaTime,
+        0,
+        Physics.maxFrameTime
+      );
+
+
+    // --------------------------------------------------------
+    // Cube
+    // --------------------------------------------------------
+
+    if (
+      this.type === EntityTypes.CUBE
+    ) {
+
+      if (!this.isSupported) {
+
+        // 90 degrees per quarter-jump phase.
+        //
+        // The exact visual sprite rotation is separate from
+        // collision physics.
+
+        const direction =
+          this.gravityDir;
+
+        const rotationSpeed =
+          7.5 *
+          direction;
+
+        this.rotation +=
+          rotationSpeed *
+          dt;
+
+        this.spinning = true;
+
+        this.renderRotation =
+          lerp(
+            this.renderRotation,
+            this.rotation,
+            clamp(
+              dt * Physics.rotationLerp,
+              0,
+              1
+            )
+          );
+
+      } else {
+
+        this.spinning = false;
+
+        const quarterTurn =
+          Math.PI / 2;
+
+        const snapped =
+          Math.round(
+            this.rotation /
+            quarterTurn
+          ) *
+          quarterTurn;
+
+
+        this.renderRotation =
+          lerp(
+            this.renderRotation,
+            snapped,
+            clamp(
+              dt *
+                Physics.landSnapRate,
+              0,
+              1
+            )
+          );
+
+
+        if (
+          Math.abs(
+            this.renderRotation -
+            snapped
+          ) <
+          0.001
+        ) {
+
+          this.renderRotation =
+            snapped;
+
+          this.rotation =
+            snapped;
+        }
+      }
+
+      return;
+    }
+
+
+    // --------------------------------------------------------
+    // Ship
+    // --------------------------------------------------------
+
+    if (
+      this.type === EntityTypes.SHIP
+    ) {
+
+      const maxVelocity =
+        Physics.shipMaxVelocity *
+        (this.isMini ? 1.15 : 1);
+
+
+      const normalized =
+        clamp(
+          this.velocityY /
+            maxVelocity,
+          -1,
+          1
+        );
+
+
+      const maxTilt =
+        (
+          this.config.maxTilt ||
+          30
+        ) *
+        Math.PI /
+        180;
+
+
+      this.rotation =
+        normalized *
+        maxTilt;
+
+
+      this.renderRotation =
+        lerp(
+          this.renderRotation,
+          this.rotation,
+          clamp(
+            dt *
+              Physics.shipRotationLerp,
+            0,
+            1
+          )
+        );
+
+      return;
+    }
+
+
+    // --------------------------------------------------------
+    // Ball
+    // --------------------------------------------------------
+
+    if (
+      this.type === EntityTypes.BALL
+    ) {
+
+      if (!this.isSupported) {
+
+        const roll =
+          this.velocityY *
+          0.004;
+
+        this.rotation +=
+          roll *
+          dt *
+          this.gravityDir;
+
+      } else {
+
+        const quarterTurn =
+          Math.PI / 2;
+
+        const snapped =
+          Math.round(
+            this.rotation /
+            quarterTurn
+          ) *
+          quarterTurn;
+
+
+        this.renderRotation =
+          lerp(
+            this.renderRotation,
+            snapped,
+            clamp(
+              dt *
+                Physics.landSnapRate,
+              0,
+              1
+            )
+          );
+
+        this.rotation =
+          this.renderRotation;
+      }
+
+      return;
+    }
+
+
+    // --------------------------------------------------------
+    // Spider
+    // --------------------------------------------------------
+
+    if (
+      this.type === EntityTypes.SPIDER
+    ) {
+
+      this.renderRotation =
+        lerp(
+          this.renderRotation,
+          0,
+          clamp(
+            dt *
+              Physics.rotationLerp,
+            0,
+            1
+          )
+        );
+
+      return;
+    }
+
+
+    // --------------------------------------------------------
+    // Default
+    // --------------------------------------------------------
+
+    this.renderRotation =
+      lerp(
+        this.renderRotation,
+        this.rotation,
+        clamp(
+          dt *
+            Physics.rotationLerp,
+          0,
+          1
+        )
+      );
+  }
 }
